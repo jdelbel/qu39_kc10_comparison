@@ -1,0 +1,2078 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+library(scales)
+library(ggpmisc)
+
+```
+
+```{r}
+#Downloading data - I need to download new versions of both QU24 and QU39 as changes made to the portal making it hard to bind the files.
+
+
+
+#Download CTD data - entire QU39 data-set
+ctd <- read.csv(here("files_big", "ctd_2015_2023.csv"))
+
+hplc <- read.csv(here("files", "2024-03-20_HakaiData_hplc.csv"))
+
+chl <- read_csv(here("files", "2024-05-24_HakaiData_chlorophyll.csv"))
+
+chl_j <- read_csv(here("files", "Hakai_Bottle_Data_QU39_2014-01-01_None.csv"))
+
+```
+
+```{r}
+hplc2 <- hplc %>% 
+  select(date, line_out_depth, all_chl_a, all_chl_a_flag) %>% 
+  drop_na() %>% 
+  mutate(pres = case_when(line_out_depth == 0 ~ 1,
+                           TRUE ~ as.numeric(line_out_depth))) %>% 
+  mutate(date = lubridate::ymd(date))
+```
+
+```{r}
+chl2 <- chl %>% 
+  filter(filter_type == "Bulk GF/F") %>% 
+  select(date, line_out_depth, pressure_transducer_depth, chla, chla_flag) %>% 
+  filter(!is.na(chla)) 
+
+
+%>% 
+  filter(chla_flag == "AV" | is.na(chla_flag)) %>% 
+  mutate(pres = case_when(line_out_depth == 0 ~ 1,
+                           TRUE ~ as.numeric(line_out_depth))) %>% 
+  mutate(date = lubridate::ymd(date))
+
+cj <- chl_j %>% 
+  select(time, site_id, depth, line_out_depth, pressure_transducer_depth,
+         chl = chlorophyll_chla_Bulk_GF_F, chl_flag = chlorophyll_chla_flag_Bulk_GF_F,
+         ctd_device_sn, ctd_direction_flag, ctd_flc, ctd_flc_flag) %>% 
+  mutate(date = lubridate::date(time)) %>% 
+  filter(site_id == "QU39") %>% 
+  filter(ctd_direction_flag == "d") %>% 
+  filter(chl_flag == "AV" | is.na(chl_flag))
+```
+
+```{r}
+#Wrangling CTD profiles data
+prof <- ctd %>%
+  filter(Cast.Direction == "d") %>% 
+  mutate(date = lubridate::date(Measurement.time)) %>%
+  mutate(year = lubridate::year(Measurement.time)) %>%
+  select(castpk = Cast.PK, hakai_id = Hakai.ID, Cruise, ctdNum = CTD.serial.number,
+         station = Station, lat = Latitude,
+         long = Longitude, time = Measurement.time, date, year,
+         dep = Depth..m., pres = Pressure..dbar.,
+         flu = Fluorometry.Chlorophyll..ug.L., sal = Salinity..PSU.)
+
+#Reduce columns, rename to workable name for queries and join drop metadata to drop data
+# prof <- cast_bind %>%
+#   left_join(meta_bind, by = "Cast PK") %>% 
+#   mutate(date = lubridate::date(`Measurement time`)) %>%
+#   mutate(year = lubridate::year(`Measurement time`)) %>%
+#   select(castpk = `Cast PK`, ctdNum = `CTD serial number`, 
+#          ctdFirm = `CTD firmware version`, station = Station.x, lat = Latitude,
+#          long = Longitude, time = `Measurement time`, date, year,
+#          dep = `Depth (m)`, pres = `Pressure (dbar)`,
+#          flu = `Fluorometry Chlorophyll (ug/L)`)
+```
+
+```{r}
+#Determining total number of profiles
+prof_num <- prof %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+
+#289 profiles from QU39 profiles + 11 profiles from QU24. Now it's saying 507 profiles - I think I made a mistake earlier
+```
+
+```{r}
+#creating cast number to organize plotting profiles
+prof <- prof %>% 
+group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+```
+
+```{r}
+#Lists of questionable profiles - bad data or profile starts deeper than 3m depth. I should separate the profiles that start deeper in case some can be saved -  don't need to be removed with bad data casts.
+
+prof_check_list <- c(258, #Needs further investigation - SVD flag for CTD parameters - REMOVE
+                     706, #Only goes to about 60m - Keep depending on integration depth. Righ now 100m.
+                     754, #Starts deep - REMOVE
+                     761, #Starts deep - REMOVE
+                     798, #starts deep - REMOVE
+                     965, #starts deep, but only at 4m. REMOVE for now.
+                     1076, #starts deep - REMOVE
+                     6838, #Really weird profile
+                     7031, #Really weird profile
+                     7066, #All following have high offset and bad data - REMOVE
+                     7086, 
+                     7102, 
+                     7111, 
+                     7119, 
+                     7123,
+                     7135, 
+                     7145, 
+                     7161, 
+                     7162, 
+                     7176, 
+                     7184, 
+                     7189, 
+                     7202, 
+                     7203, 
+                     7204, 
+                     8531, #Large spike among very low values. Will skew integration. REMOVE?
+                     9558, #starts deep - REMOVE
+                     10964, #Bad cast, not sure why not removed from initial investigation
+                     10982, #Not sure why this wasn't deleted...
+                     13377, #High offset and much higher than chl - REMOVE
+                     13712, #Saturated - REMOVE as not representative.
+                     16083, #Very shallow cast - REMOVE
+                     17453, #Very high surface spike - 3x > profile. Real? Not supported by Chl - REMOVE?
+                     18685) #Shallow cast. 
+
+#Look at 8532. looks like there are duplicate records.
+
+```
+
+
+```{r}
+#For now, I am removing the above list of profiles, but this needs to be reviewed as some may be salvagable. 
+
+prof_qc1 <- prof %>% 
+  filter(!(castpk %in% prof_check_list)) 
+
+#I am also removing records that have zero or negative values. I investigated these and they are from the seabird CTDs and result in a poor dark count as they pull the mean down. 
+
+#there are still values that go very low that are not being removed. Need to look at these. I think removing flu values that are < 0.01 will target most of these - they are all from 7674 and deep. This helped, but still some downspikes -  if I raise the threshhold then it starts to include some surface values from 80217 that were very low - probably either had air/bubbles or strong NPQ.
+
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu, which( flu < 0), NA),
+         flu = replace(flu, which( flu == 0), NA),
+         flu = replace(flu, which( flu < 0.01), NA))
+
+#this is where my NAs are coming from.
+```
+
+```{r}
+#Continuing on with dark count analysis - Could do this in a similar way that I did in Jen's paper -  used an average of values deeper than 250 m. Although I'm not sure that all casts go this deep. 
+
+#Checking the min and max depth of each profile so I can see what depth range I could use for dark offsets
+prof_dep <- prof_qc1 %>% 
+  group_by(castpk) %>% 
+  summarise(min_dep = min(pres),
+            max_dep = max(pres)) %>%
+  ungroup() 
+
+#For now, I am going to eliminate profiles that are shallower than 100m. It is hard to derive a dark value for these profiles and I'm not sure that they are deep enough to incorporate. I will do analysis to asses and if useable, then I will subtract the offsets from prior/post casts.
+prof_shallow <- prof_dep %>% 
+  filter(max_dep < 100)
+
+#List of shallow casts to remove.
+prof_shallow_list <- prof_shallow$castpk
+
+#Removing shallow casts.
+prof_qc1 <- prof_qc1 %>% 
+  filter(!castpk %in% prof_shallow_list)
+```
+
+
+```{r}
+#To start - trying to find lowest 20 values and then averaging these to derive a dark value.
+
+#I remove profiles that didn't extend past 100m. I am going to use 50m as a threshold for the selection of the 20 dark values for averaging. I was using 100m, but there was one profile that had a minima between 50-100m. This minima was slightly lower than the deeper waters, so doesn't make a huge difference, but good to target the lowest values.
+prof_20 <- prof_qc1 %>%
+  group_by(castpk) %>%
+  filter(pres > 100 & min_rank((flu)) <= 10) %>% 
+  group_by(castpk) %>% 
+  mutate(min_flu = min(flu),
+         max_flu = max(flu),
+         min_mean = mean(flu),
+         min_std = sd(flu),
+         min_dep = min(pres),
+         max_dep = max(pres)) %>% 
+  ungroup()
+
+#Selecting distinct dark mean values for each cast pk - two profiles where both the min and max dark value was derived shallow than 100 m (7031). 
+prof_20_means <- prof_20 %>% 
+  distinct(castpk, .keep_all = TRUE) %>% 
+  select(castpk, ctdNum, station, date, min_flu, max_flu, min_mean, min_std,
+         min_dep, max_dep)
+
+```
+
+```{r}
+#Plot showing average and standard deviation of 10 minimum values for each cast.
+
+prof_20 %>% 
+  ggplot(aes(x = date, y = min_mean)) +
+  geom_point(size = 3, pch = 21, fill = "white", stroke = 1.2) +
+  geom_errorbar(aes(ymin = min_mean - min_std,
+                    ymax = min_mean + min_std)) + 
+  facet_wrap(~ ctdNum, ncol = 1, scales = "free_y") +
+  labs(x = "Date",
+           y = "Profile Avg. 10 minimum fluorescence values") +
+  scale_y_continuous(limits = c(0, NA)) +
+  theme_bw() +
+  theme(text = element_text(size = 40),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "dark_correction_mean_minimum_10_all_ctds.png"), 
+       width = 16, height = 16, dpi = 300)
+
+#One profile from 1907674 where dark is > 2. Castpk 13377. CTD variables all had SVC - could just be a bad cast. Strange to have a single cast with a very high offset. Chlorophyll from this date is very low and CTD fluoroscence is high - Removing for now. Added to remove list above.
+
+#The casts from QU24 (and 80217) actually had quite a bit of variability and all from the same time period. I'm wondering if this has to do with the large blooms during this year influencing the dark values. Should plot these out and look.
+
+#the 2022 cast don't have an instrument number?
+
+```
+
+
+```{r}
+#Plotting single instrument dark values. SBE1907674
+
+prof_20 %>% 
+  filter(ctdNum == 1907674 & min_mean < 0.3) %>% 
+  ggplot(aes(x = date, y = min_mean)) +
+  geom_point(size = 3, pch = 21, fill = "white", stroke = 1.2) +
+  geom_errorbar(aes(ymin = min_mean - min_std,
+                    ymax = min_mean + min_std)) + 
+  labs(x = "Date",
+           y = "Avg. 10 min. flu. (>100m)") +
+  ggtitle("SBE1907674 Two Outliers Removed") +
+  scale_y_continuous(limits = c(0, NA)) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "dark_correction_mean_minimum_10_1907674.png"), 
+       width = 16, height = 6, dpi = 300)
+
+#Look at when the instrument was sent in for calibration and if the fluorometer was calibrated. 
+#I wonder if the spikes relate to the spring bloom?
+
+#2023-04-13 - adjustments not necessary.
+#2022-01-09 - Doesn't look like calibration was done.
+```
+```{r}
+#Plotting single instrument dark values. SBE1907674
+
+prof_20 %>% 
+  filter(ctdNum == 211567) %>% 
+  ggplot(aes(x = date, y = min_mean)) +
+  geom_point(size = 3, pch = 21, fill = "white", stroke = 1.2) +
+  geom_errorbar(aes(ymin = min_mean - min_std,
+                    ymax = min_mean + min_std)) + 
+  labs(x = "Date",
+           y = "Avg. 10 min. flu.") +
+  ggtitle("SBE1907674 Two Outliers Removed") +
+  scale_y_continuous(limits = c(0, NA)) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "dark_correction_mean_minimum_10_211567.png"), 
+       width = 16, height = 6, dpi = 300)
+```
+
+```{r}
+
+#Looking into the different cruises performed
+ctd_cruise <- prof_qc1 %>% 
+  distinct(Cruise)
+
+#Creating a list of surveys that I am pretty confident do not match with the bottle samples
+cruise_exclude <- c("Reconnaissance", "NOAA", "PICES", "BIOSIEGE",
+                    "ZOOPSPRINT", "MARIA", "anomaly_cors",
+                    "GLIDER CAMP DEPLOYMENT DAY")
+
+#Filtering out cruises in the above list to hopefully limit some of the duplicates
+prof_qc1 <- prof_qc1 %>% 
+  filter(!Cruise %in% cruise_exclude)
+
+#checking that the correct cruises were retained.
+ctd_cruise_check <- prof_qc1 %>%
+  distinct(Cruise)
+
+
+```
+
+
+```{r}
+#Maybe it's just worth comparing with hplc here and digging
+
+#Pulling out comparison depths
+prof_match <- prof_qc1 %>% 
+  filter(pres == 1 | pres == 5 | pres == 10 | pres == 20 | pres == 30) %>% 
+  group_by(date, pres, ctdNum) %>% 
+  summarise(flu_dm = mean(flu)) %>% 
+  ungroup()
+
+hplc_join <- hplc2 %>% 
+  group_by(date, pres) %>% 
+  summarise(tchla_dm = mean(all_chl_a)) %>% 
+  ungroup() %>% 
+  left_join(prof_match) %>% 
+  mutate(year = lubridate::year(date))
+```
+
+```{r}
+prof_match2 <- prof_qc1 %>% 
+  group_by(date, pres, ctdNum) %>% 
+  summarise(flu_dm = mean(flu),
+            flu_sd = sd(flu)) %>% 
+  ungroup()
+
+by <- join_by(date, closest(pressure_transducer_depth <= pres))
+
+test <- chl2 %>% 
+  group_by(date, line_out_depth, pressure_transducer_depth) %>% 
+  summarise(chl_dm = mean(chla),
+            chl_sd = sd(chla)) %>% 
+  ungroup() %>%
+  left_join(prof_match2, by)
+
+test2 <- chl2 %>% 
+  group_by(date, line_out_depth) %>% 
+  summarise(chl_dm = mean(chla),
+            chl_sd = sd(chla)) %>% 
+  ungroup() %>%
+  rename(pres = line_out_depth) %>% 
+  left_join(prof_match2)
+  
+```
+
+```{r}
+formula <- y~x-1
+
+test %>% 
+  filter(line_out_depth == 5) %>% 
+  filter(ctdNum == 1907674) %>% 
+  ggplot(aes(x = flu_dm, y = chl_dm)) +
+  # geom_point(aes(fill = pres), pch = 21, size = 5) +
+  geom_errorbar(aes(ymin = chl_dm - chl_sd, ymax = chl_dm + chl_sd), width = 1) +
+  geom_pointrange(aes(xmin = flu_dm - flu_sd, xmax = flu_dm + flu_sd,
+                      fill = pres), pch = 21, size = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", color = "black", formula = y~x-1, 
+              fullrange = TRUE, se = T, size = 1) +
+  viridis::scale_fill_viridis(option = "mako", trans = "reverse") +
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~")), 
+               formula = formula, parse = TRUE, size = 12, label.y = 8) +
+  xlim(0, 8) +
+  ylim(0, 8) +
+  labs(x = "CTD Fluorescence (ug/L)",
+       y = "Chla (ug/L)",
+       fill = "Depth (m)") +
+  ggtitle("Join transducer depth (target 5m) - CTD#1907674") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 30),
+        axis.text = element_text(colour = "black"),
+        legend.key.height = unit(2.5, "cm"),
+        legend.key.width = unit(1, "cm"))
+
+ggsave(here("figures", "chl_ctd1907674_transducer.png"),
+       width = 12, height = 9, dpi = 300)
+```
+
+```{r}
+testj <- cj %>% 
+  filter(site_id == "QU39") %>% 
+  filter(line_out_depth == 5) %>% 
+  filter(ctd_device_sn == 1907674) %>%
+  filter(!is.na(pressure_transducer_depth)) %>% 
+  filter(!is.na(chl)) %>% 
+  group_by(date) %>% 
+  mutate(n_date = n()) %>% 
+  ungroup()
+
+testjd <- chl2 %>% 
+  group_by(date, line_out_depth) %>% 
+  summarise(chl_dm = mean(chla),
+            chl_sd = sd(chla)) %>% 
+  ungroup() %>%
+  rename(pres = line_out_depth) %>% 
+  left_join(prof_match2) %>% 
+  filter(pres == 5) %>% 
+  filter(ctdNum == 1907674) %>% 
+  group_by(date) %>% 
+  mutate(n_date = n()) %>% 
+  ungroup()
+
+test_join <- testj %>% 
+  left_join(testjd)
+```
+
+
+```{r}
+cj %>% 
+  ggplot(aes(x = ctd_flc, y = chl)) +
+  geom_point(aes(fill = pressure_transducer_depth), pch = 21, size = 8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", color = "black", formula = y~x-1, 
+              fullrange = TRUE, se = T, size = 1) +
+  viridis::scale_fill_viridis(option = "mako", trans = "reverse") +
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~")), 
+               formula = formula, parse = TRUE, size = 12, label.y = 8) +
+  xlim(0, 8) +
+  ylim(0, 8) +
+  labs(x = "CTD Fluorescence (ug/L)",
+       y = "Chla (ug/L)",
+       fill = "Depth (m)") +
+  ggtitle("Join transducer depth (target 5m) - CTD#1907674") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 30),
+        axis.text = element_text(colour = "black"),
+        legend.key.height = unit(2.5, "cm"),
+        legend.key.width = unit(1, "cm"))
+
+ggsave(here("figures", "chl_ctd1907674_transducer_jessy.png"),
+       width = 12, height = 9, dpi = 300)
+```
+
+
+
+```{r}
+test2 %>% 
+  filter(pres == 5) %>% 
+  filter(ctdNum == 1907674) %>% 
+  ggplot(aes(x = flu_dm, y = chl_dm)) +
+  # geom_point(aes(fill = pres), pch = 21, size = 5) +
+  geom_errorbar(aes(ymin = chl_dm - chl_sd, ymax = chl_dm + chl_sd), width = 1) +
+  geom_pointrange(aes(xmin = flu_dm - flu_sd, xmax = flu_dm + flu_sd,
+                      fill = pres), pch = 21, size = 2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", color = "black", formula = y~x-1, 
+              fullrange = TRUE, se = T, size = 1) +
+  viridis::scale_fill_viridis(option = "mako", trans = "reverse") +
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~")), 
+               formula = formula, parse = TRUE, size = 12, label.y = 8) +
+  xlim(0, 8) +
+  ylim(0, 8) +
+  labs(x = "CTD Fluorescence (ug/L)",
+       y = "Chla (ug/L)",
+       fill = "Depth (m)") +
+  ggtitle("Join target depth (5m) - CTD#1907674") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 30),
+        axis.text = element_text(colour = "black"),
+        legend.key.height = unit(2.5, "cm"),
+        legend.key.width = unit(1, "cm"))
+
+ggsave(here("figures", "chl_ctd1907674_target.png"),
+       width = 12, height = 9, dpi = 300)
+```
+
+
+
+
+
+
+```{r}
+formula <- y~x-1
+
+fig_cors <- hplc_join %>% 
+  filter(!pres == 1 & !is.na(ctdNum)) %>% 
+  ggplot(aes(x = flu_dm, y = tchla_dm)) +
+  geom_point(aes(fill = as.factor(pres)), pch = 21, size = 5) +
+  geom_smooth(method = "lm", color = "black", formula = y~x-1, 
+              fullrange = TRUE, se = F, size = 2) +
+  scale_fill_brewer(palette = "RdYlBu") +
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~")), 
+               formula = formula, parse = TRUE, size = 8) +
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)),
+              limits = c(10^-2, 10^2)) +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)),
+              limits = c(10^-2, 10^2)) +
+  annotation_logticks() +
+  facet_wrap(~ctdNum, scales = "free", nrow = 2) +
+  labs(x = "CTD Fluorescence (ug/L)",
+       y = "HPLC TChla (ug/L)",
+       fill = "Depth") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 32),
+        axis.text = element_text(colour = "black"),
+        legend.position = c(0.79, 0.19))
+
+# ggsave(here("figures", "hplc_fluorescence_ctd_log10.png"), 
+#        width = 16, height = 16, dpi = 300)
+
+# http://www.sthda.com/english/wiki/ggplot2-axis-scales-and-transformations
+```
+
+
+```{r}
+formula <- y~x-1
+
+fig_cors_linear <- hplc_join %>% 
+  # filter(!pres == 1 & !is.na(ctdNum)) %>% 
+  ggplot(aes(x = flu_dm, y = tchla_dm)) +
+  geom_point(aes(fill = as.factor(pres)), pch = 21, size = 5) +
+  geom_smooth(method = "lm", color = "black", formula = y~x-1, 
+              fullrange = TRUE, se = F, size = 2) +
+  scale_fill_brewer(palette = "RdYlBu") +
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~")), 
+               formula = formula, parse = TRUE, size = 8) +
+  # scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+  #             labels = trans_format("log10", math_format(10^.x)),
+  #             limits = c(10^-2, 10^2)) +
+  # scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+  #             labels = trans_format("log10", math_format(10^.x)),
+  #             limits = c(10^-2, 10^2)) +
+  # annotation_logticks() +
+  facet_wrap(~ctdNum, nrow = 2) +
+  labs(x = "CTD Fluorescence (ug/L)",
+       y = "HPLC TChla (ug/L)",
+       fill = "Depth") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 32),
+        axis.text = element_text(colour = "black"),
+        legend.position = c(0.79, 0.19))
+
+# ggsave(here("figures", "hplc_fluorescence_ctd_log10.png"), 
+#        width = 16, height = 16, dpi = 300)
+
+# http://www.sthda.com/english/wiki/ggplot2-axis-scales-and-transformations
+```
+
+
+```{r}
+fig_ctd <- hplc_join %>% 
+  filter(pres == 5 & !is.na(ctdNum)) %>% 
+  ggplot(aes(x = date, y = as.factor(ctdNum), width = 10,
+             fill = as.factor(ctdNum))) +
+  # geom_point(pch = 21, size = 2) +
+  geom_tile() +
+  # geom_bar(stat = "identity") +
+  ggsci::scale_fill_jama() +
+  scale_x_date(limits = as.Date(c("2015-01-01", "2024-01-01")),
+               expand = c(0, 0),
+               date_breaks = "years", date_labels = "%b%y") +
+  theme_bw() +
+  labs(y = "CTD #") +
+  theme(panel.grid.major.x =  element_line(color = "darkgrey", size = 0.5),
+        panel.grid.minor.x =  element_line(color = "darkgrey", size = 0.5),
+        legend.position = "none",
+        legend.title = element_blank(),
+        text = element_text(size = 32), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        plot.margin = margin(0, 1.1, 0, 0, "cm"))
+
+# ggsave(here("figures", "test.png"), 
+#        width = 16, height = 4, dpi = 300)
+```
+
+```{r}
+fig_panel <- wrap_elements(full = fig_ctd) / fig_cors + 
+  plot_layout(heights = c(0.3, 1))
+
+ggsave(here("figures", "hplc_fluorescence_ctd_log10.png"), fig_panel,
+        width = 20, height = 14, dpi = 300)
+```
+
+
+```{r}
+fig_panel_linear <- wrap_elements(full = fig_ctd) / fig_cors_linear + 
+  plot_layout(heights = c(0.3, 1))
+
+ggsave(here("figures", "hplc_fluorescence_ctd_linear_1m.png"), fig_panel_linear,
+        width = 20, height = 14, dpi = 300)
+```
+
+
+
+```{r}
+#Looking at data from the two sensors used in 2022 and 2023 to see if there are differences when only these are isolated.
+
+
+
+
+formula <- y~x-1
+
+hplc_join %>% 
+  filter(!pres == 1 & !is.na(ctdNum)) %>% 
+  filter(ctdNum == 211567 | ctdNum == 1907674) %>% 
+  filter(year > 2021) %>% 
+  ggplot(aes(x = flu_dm, y = tchla_dm)) +
+  geom_point(aes(fill = as.factor(pres)), pch = 21, size = 5) +
+  geom_smooth(method = "lm", color = "black", formula = y~x-1, 
+              fullrange = TRUE, se = F, size = 2) +
+  scale_fill_brewer(palette = "RdYlBu") +
+  stat_poly_eq(aes(label = paste(..eq.label.., ..rr.label.., sep = "~~")), 
+               formula = formula, parse = TRUE, size = 8) +
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)),
+              limits = c(10^-2, 10^2)) +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)),
+              limits = c(10^-2, 10^2)) +
+  annotation_logticks() +
+  facet_wrap(~ctdNum, scales = "free", nrow = 2) +
+  labs(x = "CTD Fluorescence (ug/L)",
+       y = "HPLC TChla (ug/L)",
+       fill = "Depth") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 32),
+        axis.text = element_text(colour = "black"),
+        legend.position = c(0.79, 0.19))
+
+ggsave(here("figures", "hplc_fluorescence_ctd_log10_2022_2023.png"),
+       width = 12, height = 14, dpi = 300)
+
+# http://www.sthda.com/english/wiki/ggplot2-axis-scales-and-transformations
+```
+
+```{r}
+#Looking at what sampling depth usually had the peak in chlorophyll biomass.
+c_max <- prof_qc1 %>% 
+  group_by(castpk) %>% 
+  slice_max(flu) %>% 
+  ungroup()
+
+#Summarizing the number of times each depth was the max depth for each station
+c_max_n <- c_max %>% 
+  group_by(pres) %>% 
+  summarise(n_max = n(),
+            med_flu = median(flu)) %>% 
+  ungroup() %>% 
+  # group_by(site_id) %>% 
+  mutate(sum = sum(n_max)) %>% 
+  ungroup() %>% 
+  mutate(max_perc = n_max/sum*100,
+         perc_check = sum(max_perc)) %>% 
+  mutate_at(vars(max_perc), funs(round(., 0)))
+```
+```{r}
+f1 <- c_max_n %>% 
+  filter(pres < 30) %>% 
+  ggplot(aes(x = pres, y = n_max)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  geom_text(aes(label = n_max), position = position_dodge(width = 0.9),
+            vjust = -0.25, size = 10) +
+  ggsci::scale_fill_npg(name = "Depth") +
+  ylim(0, 100) +
+  ylab("# Max Chl") +
+  ggtitle("QU39 Chlorophyll Fluorometer") +
+  theme_bw() +
+  theme(legend.position = c(0.06, 0.75),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text = element_text(color = "black"),
+        text = element_text(size = 35, 
+                            color = "black"))
+
+f2 <- c_max_n %>% 
+  filter(pres < 30) %>% 
+  ggplot(aes(x = pres, y = max_perc)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  geom_text(aes(label = max_perc), position = position_dodge(width = 0.9),
+            vjust = -0.25, size = 10) +
+  ggsci::scale_fill_npg(name = "Depth") +
+  ylim(0, 100) +
+  ylab("% Max Chl") +
+  theme_bw() +
+  theme(legend.position = c(0.06, 0.75),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        axis.text = element_text(color = "black"),
+        text = element_text(size = 35, 
+                            color = "black"))
+
+# c_max_n %>% 
+#   filter(pres < 30) %>% 
+#   ggplot(aes(x = pres, y = med_flu)) +
+#   geom_bar(stat = "identity", position = "dodge", color = "black") +
+#   # geom_text(aes(label = n_max), position = position_dodge(width = 0.9),
+#   #           vjust = -0.25, size = 10) +
+#   ggsci::scale_fill_npg(name = "Depth") +
+#   # ylim(0, 20) +
+#   ylab("# Max Chl") +
+#   ggtitle("QU39 Chlorophyll Fluorometer") +
+#   theme_bw() +
+#   theme(legend.position = c(0.06, 0.75),
+#         axis.title.x = element_blank(),
+#         # axis.text.x = element_blank(),
+#         axis.text = element_text(color = "black"),
+#         text = element_text(size = 35, 
+#                             color = "black"))
+
+fig <- f1/f2
+
+ggsave(here("figures", "chl_max_dep_fluorometer.png"), fig,
+       width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+
+
+prof_qc1 <- prof_qc1 %>% 
+  mutate(month = lubridate::month(date))
+
+prof_qc1 <- prof_qc1 %>%
+  mutate(season = case_when(month == 12 | month == 1 | month == 2 ~ "Winter",
+                            month >= 3 & month <= 5 ~ "Spring",
+                            month >= 6 & month <= 8 ~ "Summer",
+                            month >= 9 & month <= 11 ~ "Autumn",)) %>%
+  relocate(season, .after = month)    
+  
+#Order locations from fjord to shelf
+order_loc_seas <- c("Winter", "Spring", "Summer", "Autumn")
+
+#Chemtax - Specify order of phyto groups for figures
+prof_qc1 <- arrange(mutate(prof_qc1,
+                         season = factor(season, levels = order_loc_seas)))
+
+
+```
+
+```{r}
+prof_qc1 %>%
+  ggplot() +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  geom_hline(yintercept = 5, linetype = "dotted") +
+  geom_hline(yintercept = 10, linetype = "dotted") +
+  geom_hline(yintercept = 20, linetype = "dotted") +
+  geom_hline(yintercept = 30, linetype = "dotted") +
+  geom_smooth(data = prof_qc1, aes(x = flu, y = pres),
+              orientation = "y", method = "loess", span = 0.3, se = T,
+              color = "#276221", fill = "#276221", alpha = 0.4, size = 2) +
+  labs(x = "Fluorescence (ug/L)",
+       y = "Depth (m)") +
+  scale_y_reverse() +
+  ylim(40, 0) +
+  facet_grid(.~season, scales = "free_x") +
+  ggtitle("QU39 Seasonal Profiles") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "profile_season_leoss_qu39.png"),
+       width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+write.csv(prof_qc1, here("outputs", "qu39_profs_qc1.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+hplc_join %>% 
+  filter(!pres == 1) %>% 
+  ggplot(aes(x = flu_dm, y = tchla_dm)) +
+  geom_point(aes(fill = as.factor(pres)), pch = 21, size = 5) +
+  geom_smooth(method = "lm", color = "black", formula = y~x-1) +
+  scale_fill_brewer(palette = "RdYlBu") +
+  # ggpubr::stat_cor(p.accuracy = 0.001, r.accuracy = 0.01,
+  #                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+  #                  label.x = 0.1,
+  #                  label.y = 24.5,
+  #                  size = 9) +
+  ggpubr::stat_regline_equation(size = 9) +
+  # lims(y = c(0, 4),
+  #      x = c(0, 4)) +
+  # scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+  #             labels = trans_format("log10", math_format(10^.x)),
+  #             limits = c(10^-2, 10^2)) +
+  # scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+  #             labels = trans_format("log10", math_format(10^.x)),
+  #             limits = c(10^-2, 10^2)) +
+  facet_wrap(~ctdNum) +
+  labs(fill = "Depth") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "hplc_fluorescence_ctd.png"), 
+       width = 16, height = 16, dpi = 300)
+
+# http://www.sthda.com/english/wiki/ggplot2-axis-scales-and-transformations
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+#I could redo this plot with the offsets subtracted. Are the low values consistent between CTDS?
+```
+
+```{r}
+#Merging 20 minimum values with the profile datasheet to look into where they are being selected from
+prof_20_join <- prof_20 %>% 
+  select(castpk, pres, flu_20 = flu)
+
+prof_qc1 <- prof_qc1 %>%
+  left_join(prof_20_join)
+
+```
+
+```{r}
+#Looking at early 2015 80217 profiles where the dark count had relatively high cast to cast variability - was it due to the big bloom?
+
+#I have the x scales maximized for each profile, so differences can look huge even when minimal, but some troubling trends here. Decreases in fluorescence all the the way to the bottom. Minimum zone at 50m. Most troubling is 6814, 6838, 6907, 6942, 7031. The range in dark values for 80217 for 2015 in about 0.2 - assuming it dark values are generally pretty consistent (0.05) with time, then this could add error. With 50m integration max error is 0.2*50 = 10 mg/m2 - is this significant?
+
+#for now let's just go with it and keep them.
+
+prof_qc1 %>%
+  filter(ctdNum == 80217 & date < "2016-01-01") %>%
+  filter(pres > 50) %>% 
+  ggplot() +
+  geom_point(aes(x = flu, y = pres), pch = 21, size = 4, fill = "black") +
+  geom_point(aes(x = flu_20, y = pres), pch = 21, size = 4, fill = "red") +
+  facet_wrap(~ castpk, ncol = 5, scales = "free_x") +
+  scale_y_reverse(lim = c(250, 50)) +
+  theme_bw() +
+  theme(text = element_text(size = 25),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "80217_2015_check_2022.png"),
+       width = 32, height = 18, dpi = 300)
+```
+
+
+
+```{r}
+#Looking into 7674 profiles that have 4x greater dark values - Comparing casts done before and after castpk 266 & 270. Where these before and after casts done with a less or more sensitive instrument... or was chlorophyll actually just mixed down to the bottom. The interesting thing is that 266 and 270 were collected on consecutive days (2016-05-18 and 2016-05-19) and surface chlorophyll was much less on the second day. Was it mixed by a big wind event? The problem here is that if I subtract the higher dark values, it's possible they are from a real effect from chlorophyll. It's actually plausible that there was some sort of mixing/sinking event here. The Bulk chlorophyll from 260m was 0.03 (2016-05-09), 0.44 (2016-05-19) and 0.16 (2016-05-30). So should probably use the offsets from prior, so I'm not accidentally removing real chlorophyll. Crazy. That being said, the greatest deep chlorophyll from samples was on 2016-08-01 (0.84) and this did not have an elevated dark offset for the same sensor. Maybe those two profiles had a faulty cable or something... I'd like to retain as they represent bloom conditions, but this could really skew results.
+
+prof_qc1 %>%
+  filter(castpk == 253 | castpk == 266 | castpk == 270 | castpk == 306 | 
+           castpk == 446) %>%
+  # filter(pres > 100) %>% 
+  ggplot() +
+  geom_point(aes(x = flu, y = pres), pch = 21, size = 4, fill = "black") +
+  geom_point(aes(x = flu_20, y = pres), pch = 21, size = 4, fill = "red") +
+  facet_wrap(~ castpk, ncol = 5) +
+  scale_y_reverse(lim = c(250, 0)) +
+  theme_bw() +
+  theme(text = element_text(size = 25),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "1907674_deep_chl_check.png"),
+       width = 32, height = 18, dpi = 300)
+```
+
+```{r}
+#Although much better, even with low, zero and negative removal, there are still low spikes. These usually result in a higher standard deviation, so could potentially be isolated this way. As I raise the minimum value threshold, the more data that may be correct are included.
+
+#Leaving it for now because the influence appears to be minimal - one or a few points and little influence on the 20 point mean - see standard deviations in the dark value plot.
+
+check_7674 <- prof_20_means %>% 
+  filter(ctdNum == "1907674") %>% 
+  arrange(min_mean)
+
+prof_qc1 %>%
+  filter(castpk == 7707 | castpk == 566 | castpk == 394 | castpk == 567) %>%
+  filter(pres > 100) %>% 
+  ggplot() +
+  geom_point(aes(x = flu, y = pres), pch = 21, size = 4, fill = "black") +
+  geom_point(aes(x = flu_20, y = pres), pch = 21, size = 4, fill = "red") +
+  facet_wrap(~ castpk, ncol = 4) +
+  scale_y_reverse(lim = c(250, 100)) +
+  theme_bw() +
+  theme(text = element_text(size = 25),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "1907674_low_spike_check.png"),
+       width = 32, height = 18, dpi = 300)
+
+```
+
+```{r}
+#Based on this I am confident with the dark values and can subtract them from the profiles.
+
+#Steps
+#1) Merge and subtract from profile (DONE + qc'ed issues with this)
+#2) Compare with chlorophyll
+#3) Influence of NPQ?
+#4) Determine depth ranges? Look at seasonal variability by depth (needs work, but looked at. Picking 100m)
+#5) Compare with discrete chlorophyll with spline fit. 
+```
+
+```{r}
+#Merging dark counts with profile and subtracting dark values. 
+
+#Pulling dark values from the 20 point average
+dark_join <- prof_20_means %>% 
+  select(castpk, dark = min_mean)
+
+#Joining the dark values with the profiles data
+prof_qc2 <- prof_qc1 %>% 
+  left_join(dark_join) 
+
+#Subtracting the dark values from each profile depth
+prof_qc2 <- prof_qc2 %>% 
+  mutate(flu_cor = flu - dark)
+
+#Looking for negative values, zero values and NA's created following dark the correction 
+dark_cor_check <- prof_qc2 %>% 
+  filter(flu_cor < 0 | flu_cor == 0 | is.na(flu_cor))
+
+#Lots so breaking it down and looking at where, when, why.
+
+#negative values - generally very low with the highest values coming from the seabird downspikes. Will set these negatives to zero. Should investigate deeper. Did I do this?
+dark_neg <- dark_cor_check %>% 
+  filter(flu_cor < 0) %>% 
+  distinct(castpk, .keep_all = TRUE)
+
+#Corrected fluorescence with NA - all single points that had negative spikes - all associated with 7674
+dark_na <- dark_cor_check %>% 
+  filter(is.na(flu_cor)) %>% 
+  distinct(castpk, .keep_all = TRUE)
+
+#Looks to be where the dark value is equal to the fluorescence - always one of the points where the dark value was derived.
+dark_zero <- dark_cor_check %>% 
+  filter(flu_cor == 0)
+
+#Making a list of castpks where there was was
+dark_na_list <- dark_na$castpk
+```
+
+```{r}
+#Replacing negative values created during the offset subtraction with zeros.
+prof_qc2 <- prof_qc2 %>% 
+  mutate(flu_cor = replace(flu_cor, which(flu_cor < 0), 0))
+```
+
+```{r}
+#Creating a file with cast_pk and hakai_id for joining with my sample join sheet
+hakai_id <- meta_bind %>% 
+  select(castpk = `Cast PK`, Hakai_ID)
+
+prof_qc_id <- prof_qc2 %>% 
+  left_join(hakai_id) %>% 
+  relocate(Hakai_ID, .after = castpk)
+
+write_csv(prof_qc_id, here("outputs", "QC_profiles_2023-06-06.csv"))
+```
+
+
+
+
+```{r}
+#looking at seasonal cycle at different depths to derive integration depth. Could be good to bring in chlorophyll here too. Time-series is probably enough, but could make a box plot by month. 
+
+#This is tough as there are spikes at 100m, but seasonality is pretty much gone. Case could be made to use 100m. I wonder if we want to include sinking cells though? Do these really represent biomass?
+
+#Look into 0.8 spike at 150m from castpk 266 - investigated this earlier and need to make a decision.
+
+prof_qc2 %>% 
+  filter(pres == 5| pres == 120| pres == 50 | pres == 75 | pres == 100 |
+           pres == 150) %>% 
+  ggplot(aes(x = date, y = flu_cor)) +
+  geom_line(size = 2) +
+  # geom_point(pch = 21, size = 1, color = "black", fill = "white") +
+  facet_grid(pres ~ ., scales = "free_y") +
+  ylab("fluorescence") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        # axis.text.x =  element_blank(),
+        strip.background = element_blank(),
+        # strip.text.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.92, 0.7),
+        legend.background = element_blank(),
+        text = element_text(size = 30))
+
+ggsave(here("figures", "int_depth_analysis_2023-06-06.png"),
+       width = 16, height = 20, dpi = 300)
+
+```
+```{r}
+#Trying a box plot to look at seasonality
+
+prof_qc2 %>%
+  mutate(month = lubridate::month(date)) %>% 
+  filter(pres == 5| pres == 120| pres == 50 | pres == 75 | pres == 100 |
+           pres == 150) %>% 
+  ggplot(aes(x = as.factor(month), y = log10(flu_cor+1))) +
+  geom_boxplot(position = position_dodge(preserve = "single"), alpha = 0.6,
+               color = "black", lwd = 0.7) +
+  # geom_dotplot(color = "black", trim = FALSE, binaxis = 'y', 
+  #              stackdir = 'center', dotsize = 1,
+  #              position = position_dodge(0.8)) +
+  facet_grid(pres ~ ., scales = "free_y") +
+  ylab("log10(fluorescence+1)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        # axis.text.x =  element_blank(),
+        strip.background = element_blank(),
+        # strip.text.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.92, 0.7),
+        legend.background = element_blank(),
+        text = element_text(size = 30))
+
+ggsave(here("figures", "int_depth_analysis_box_2023-06-06.png"),
+       width = 16, height = 20, dpi = 300)
+
+```
+
+```{r}
+#First pass at integration - shallowest used is 3m as this includes all casts. Deep threshold is 100m.
+
+#Redundant, but making sure all remaining casts go to 3m depth. Query has 0 results, so good.
+int_dep <- prof_qc2 %>%
+  group_by(castpk) %>% 
+  summarise(min_dep = min(pres),
+            max_dep = max(pres)) %>% 
+  ungroup() %>% 
+  filter(min_dep > 3 | max_dep < 100)
+
+#Performing integration for 3-100m depth. For the integration, I ignored NAs because there was a single casts that had an NA at 49m (castpk == 17280) and the integration was not being calculated for this cast. I think it is OK to ignore one point of the integration, especially since it was from 49 where chlorophyll was low and not contributing much to the total. That being said, as new data is being incorporated, need to be careful as an NA in the chlorophyll maxima could really skew the results low.
+int_1 <- prof_qc2 %>%
+  filter(pres > 2 & pres < 101) %>% 
+  group_by(castpk) %>% 
+  mutate(int_100 = sum(flu_cor, na.rm = TRUE)) %>% 
+  distinct(castpk, int_100, .keep_all = TRUE) %>% 
+  ungroup()
+
+```
+
+```{r}
+#Looking at casts that throw an NA for the integration value.
+
+#Originally there were 4 casts - 3 because I was putting NA's for negative values created during the offset subtraction. Now these are set to zero because they represent the limit of detection. There was 1 that occured because there was no fluorescence value at a single depth (49m, castpk == 17280), but I now have just removed that depth from the calculation for this profile (see above)
+
+#these following queries should now throw zero records.
+int_na <- int_1 %>% 
+  filter(is.na(int_100))
+
+#Making a list of castpks
+int_na_list <- int_na$castpk
+
+#Separating profiles for inspection
+int_na_check <- prof_qc2 %>% 
+  filter(castpk %in% int_na_list)
+
+```
+
+
+
+```{r}
+#Integration using 3 - 100m depth. No averaging of days with replicate casts.
+
+
+int_1 %>% 
+  ggplot(aes(x = date, y = int_100)) +
+  geom_line(size = 1) +
+  # geom_point(pch = 21, size = 1, color = "black", fill = "white") +
+  ylab("Int. Flu. 3-100m (mg/m2)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        text = element_text(size = 30))
+
+ggsave(here("figures", "int_3-100_v1_2023-06-06.png"),
+       width = 16, height = 6, dpi = 300)
+```
+
+```{r}
+#Looking at days with duplicate/replicate casts
+
+#Creating a column with number of casts per date
+int_1 <- int_1 %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() 
+
+#Creating a data sheet with only more than one cast per day. A few have three casts, most have 2.
+int_dup <- int_1 %>% 
+  filter(n > 1) %>% 
+  arrange(time)
+
+#Calculating standard deviation between duplicates - I don't think this is the best measure for duplicates, but at least it gives an idea.
+int_dup <- int_dup %>% 
+  group_by(date) %>% 
+  mutate(int_sdev = sd(int_100)) %>% 
+  ungroup()
+
+#Looking at time difference between duplicate casts. Convert time column to time. Calculates the time difference from the previous/above row - grouped by day, so only calculates within each day with replicate casts. Zero out NAs for start time which the difference is calculated from. 
+int_dup <- int_dup %>% 
+  mutate(time = lubridate::ymd_hms(time)) %>% 
+  group_by(date) %>% 
+  arrange(time) %>% 
+  mutate(time_diff = as.numeric(time - lag(time), units = 'hours')) %>% 
+  ungroup() %>% 
+  mutate(time_diff = replace_na(time_diff, 0))
+
+#Some big differences between duplicate casts - separating the casts with the highest differences between duplicates.
+dup_high_sd <- int_dup %>% 
+  filter(int_sdev > 10)
+
+#Creating a list of duplicate casts with large differences in integrated values - all are greater than an hour difference.
+dup_high_sd_list <- dup_high_sd$castpk
+
+```
+
+```{r}
+#Numbering the duplicates for each day and then joining to the profile data below. This makes plotting in facets easier.
+dup_num <- dup_high_sd %>% 
+  group_by(date) %>% 
+  mutate(num = 1:n()) %>% 
+  select(castpk, num)
+
+#Selecting the casts that have integration values with high standard deviations, reducing to integration range (<100m depth) and left joining with daily cast number for plotting blow.
+dup_plot <- prof_qc2 %>%
+  filter(castpk %in% dup_high_sd_list) %>%
+  filter(pres < 100) %>% 
+  left_join(dup_num)
+
+```
+
+
+```{r}
+#Plotting the duplicate casts that have integration values with high standard deviations
+
+#From this plot, some seem OK, with relatively similar trends
+
+dup_plot %>% 
+  ggplot() +
+  geom_point(aes(x = flu, y = pres, color = as.factor(num))) +
+  facet_wrap(~ date, nrow = 2, scales = "free_x") +
+  scale_y_reverse(lim = c(100, 0)) +
+  theme_bw() +
+  theme(text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.position = "none")
+
+ggsave(here("figures", "duplicate_cast_check_2023-06-06.png"),
+       width = 16, height = 8, dpi = 300)
+```
+
+```{r}
+#Duplicates are a pretty complex issue, especially if you consider that the difference might be representative of true environmental variability, which it seems is the case for some casts. If this happens, which cast do you select? Or just average as it is actually more representative of true conditions? 
+
+#The biggest issue/differences I found was for 2021-05-19, because the difference represents the difference between a high (blooming) value and a low biomass value (49 vs 139 mg m-2) that appeared to be true variability based on comparison of chlorophyll samples. (had samples associated with each cast because there was an oceanography and a zoopsprint survey)
+
+#For now I am going to do daily averages. Deal with this later.
+
+#Calculating daily mean integration values
+int_1_dm <- int_1 %>% 
+  group_by(date) %>% 
+  summarise(int_100_dm = mean(int_100),
+            sd = sd(int_100))
+
+```
+
+```{r}
+#Plotting time-series with daily mean integration values. 
+
+int_1_dm %>% 
+  ggplot(aes(x = date, y = int_100_dm)) +
+  geom_line(size = 1) +
+  # geom_point(pch = 21, size = 1, color = "black", fill = "white") +
+  ylab("Int. Flu. 3-100m (mg/m2)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        text = element_text(size = 30))
+
+ggsave(here("figures", "int_3-100_v1_dm_2023-06-06.png"),
+       width = 16, height = 6, dpi = 300)
+```
+```{r}
+#Plotting years vertically with daily mean time-series.
+
+int_1_dm %>% 
+  mutate(yday = lubridate::yday(date),
+         year = lubridate::year(date)) %>% 
+  ggplot(aes(x = yday, y = int_100_dm)) +
+  geom_line(size = 1.5) +
+  geom_point(pch = 21, size = 2, color = "black", fill = "white") +
+  geom_vline(xintercept = 80) +
+  geom_vline(xintercept = 172) +
+  geom_vline(xintercept = 264) +
+  facet_grid(year ~ .) +
+  ylab("Int. Flu. 3-100m (mg/m2)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        text = element_text(size = 30))
+
+ggsave(here("figures", "int_3-100_v1_dm_vertical_2023-06-06.png"),
+       width = 16, height = 14, dpi = 300)
+```
+
+```{r}
+#Plotting annual mean - I guess for this a daily mean isn't necessary
+int_1 %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  ggplot(aes(as.factor(year), y = int_100)) +
+  geom_boxplot() +
+  theme_bw()
+
+```
+
+```{r}
+#I'd like to plot out by season - similar plot to above, but with different rows as different seasons
+
+#Adding season column based on yday - I think the yday of the season switch can be slightly different each year, but likely not enough to cause a difference with out sampling resolution. I should investigate how to do this properly, but this works for now.
+int_1_dm <- int_1_dm %>%
+  mutate(yday = lubridate::yday(date),
+         year = lubridate::year(date)) %>%
+  mutate(season = case_when(yday <= 79 ~ "winter",
+                            yday >= 80 & yday <= 171 ~ "spring",
+                            yday >= 172 & yday <= 263 ~ "summer",
+                            yday >= 264 & yday <= 354 ~ "autumn",)) %>%
+  relocate(year, .after = date) %>% 
+  relocate(yday, .after = year) %>% 
+  relocate(season, .after = yday)
+
+```
+
+```{r}
+#Plotting seasonal mean by year.
+
+#Not really showing anything. Maybe it's too course - being washed out by low values in season when there isn't a bloom. The blooms are relatively sporadic compared to the non-bloom periods. I still think bloom and wind mixing exporting that bloom could be a factor. Big bloom and then wind export? 
+
+int_1_dm %>% 
+  ggplot(aes(x = as.factor(year), y = int_100_dm)) +
+  geom_boxplot() +
+  theme_bw() +
+  facet_grid(factor(season, levels = c("winter", "spring", "summer", "autumn")) 
+                    ~ ., scales = "free_y") +
+  ylab("Int. Flu. 3-100m (mg/m2)") +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        text = element_text(size = 30))
+
+ggsave(here("figures", "box_integration_annual_seasonal_2023-06-06.png"),
+       width = 16, height = 14, dpi = 300)
+
+```
+
+```{r}
+#Wrangling chlorophyll bottle data
+
+#Converting portal timezone from UTC to Pacific time
+chl <- chl %>%
+  mutate(collected = lubridate::with_tz(collected, tz = "America/Vancouver"))
+    
+#Selecting QU39 bulk samples that have AV flag or are unflagged - new data I havent worked up yet.. Also selecting relevant columns to reduce columns numbers.
+chl <- chl %>% 
+  filter(site_id == "QU39" & filter_type == "Bulk GF/F" & 
+           (chla_flag == "AV" | chla_flag == "ADL" | is.na(chla_flag))) %>% 
+  filter(!is.na(chla)) %>% 
+  select(date, site_id, line_out_depth, collected, hakai_id, filter_type, chla, 
+         chla_flag) 
+
+#Adding month column
+chl <- chl %>% 
+  mutate(month = lubridate::month(date)) %>% 
+  relocate(month, .after = date)
+
+#Checking for replicates - there are two types: 1) a true replicate (rep_true) where samples were collected at the same time for the sake of comparison and; 2) more than one sample collected on the same day, but at different times (rep_day). These will need to be considered when averaging as the second type can be very different. We want to be as close to the CTD cast as possible, but on some these occasions the there were multiple CTD casts done as well. 
+chl <- chl %>% 
+  group_by(collected, site_id, line_out_depth, filter_type) %>% 
+  mutate(rep_true = n()) %>%
+  ungroup() %>% 
+  group_by(date, site_id, line_out_depth, filter_type) %>% 
+  mutate(rep_day = n()) %>%
+  ungroup()
+```
+
+```{r}
+#Individually looking at days where there are multiple chlorophyll samples and looking if there are corresponding CTD casts and if not, which CTD cast is closest temporally. Will remove samples that were collected at a different time than the CTD cast and have no corresponding CTD data. This ensures that the correct bottle data is matched to the CTD data.
+
+#2019-07-18 had 4 different 0m samples through day - only one CTD cast done at 10:53, so could at least filter chlorophyll to this time - filter out:
+
+#QPHY9985
+#QPHY9989
+#QPHY9993
+#QPHY9987
+#QPHY9991
+#QPHY9995
+#QPHY9990
+#QPHY9994
+
+ctd_date_check1 <- prof_qc2 %>% 
+  filter(date == "2019-07-18") %>% 
+  distinct(castpk, .keep_all = TRUE)
+
+#2016-04-01 - single cast done at 10:28. Remove below samples as they do not have a match
+
+#QPHY4218
+#QPHY4222
+
+ctd_date_check2 <- prof_qc2 %>% 
+  filter(date == "2016-04-01")
+
+#2021-07-20 - two casts done - one at 10:35 and one at 9:32 - 9:56 and 9:57 - average probably ok here?
+ctd_date_check3 <- int_1 %>% 
+  filter(date == "2021-07-20")
+
+#2021-05-19 - two different CTD casts for this one and some definite differences - this is a tricky one - averaging would likely wash differences out because the differences are reflected in both datasets. Not ideal, but just doing this for now.
+
+ctd_date_check4 <- int_1 %>% 
+  filter(date == "2021-05-19")
+
+#2018-11-28 - this is just an exact duplicate within the portal. Averaging will deal with this.
+
+#2016-04-14 - Two casts, but sample is actually a false duplicate - GFF classed as Bulk - get rid of: 
+
+#QCHL4322
+
+ctd_date_check5 <- int_1 %>% 
+  filter(date == "2016-04-14")
+
+#for now, removing troublesome chlorophyll samples and then daily averaging the rest, but should spend some time working on doing a closest match join. 
+
+#List of replicate chlorophyll samples to remove as they don't have a corresponding CTD casts.
+chl_filter_list <- c("QCHL9985", "QCHL9989", "QCHL9993", "QCHL9987", "QCHL9991",
+                     "QCHL9995", "QCHL9990", "QCHL9994", "QCHL4218", "QCHL4222",
+                     "QCHL4322")
+
+#Removing chlorophyll samples specified in the above list.
+chl_qc1 <- chl %>% 
+  filter(!(hakai_id %in% chl_filter_list))
+```
+
+
+
+```{r}
+#Performing daily means on both chlorophyll and CTD data and then joining datasets
+
+#Performing daily average on bulk chlorophyll data - I may want to use a different function other than summarize so I can keep the flags. Want to look at ADL samples and influence.
+# chl_qc1_dm <- chl_qc1 %>% 
+#   group_by(date, line_out_depth) %>% 
+#   summarize(chl_dm = mean(chla)) %>% 
+#   ungroup()
+
+chl_qc1_dm <- chl_qc1 %>% 
+  group_by(date, line_out_depth) %>% 
+  mutate(chl_dm = mean(chla)) %>% 
+  ungroup() %>% 
+  distinct(date, line_out_depth, chl_dm, .keep_all = TRUE) %>%
+  select(date, line_out_depth, chl_dm, chla_flag)
+  
+
+#Looking at what chlorophyll depths exist
+chl_depths <- chl_qc1_dm %>% 
+  group_by(line_out_depth) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+
+#Renaming line_out_depth to depth for easier merge with CTD data (should go back and do this at the beginning and change throughout as it is easier to work with in general)
+chl_qc1_dm <- chl_qc1_dm %>% 
+  rename(depth = line_out_depth)
+
+#Re-classifying the 0 meter chlorophyll samples as one meter so they match with a CTD record.
+chl_qc1_dm <- chl_qc1_dm %>% 
+  mutate(depth = case_when(depth == 0 ~ 1,
+                           TRUE ~ as.numeric(depth)))
+  
+#Performing daily mean on CTD profile data
+prof_qc2_dm <- prof_qc2 %>% 
+  group_by(date, pres, ctdNum) %>% 
+  summarise(flu_cor_dm = mean(flu_cor)) %>% 
+  ungroup()
+
+#Renaming ctd pressure column to depth so I can join with the chlorophyll data
+prof_qc2_dm <- prof_qc2_dm %>% 
+  rename(depth = pres)
+
+#Attempting to join
+chl_ctd <- chl_qc1_dm %>% 
+  left_join(prof_qc2_dm)
+
+#Cross checking whether it created any duplicates - sometimes joining can do this. Doesn't look like it did.
+chl_ctd <- chl_ctd %>% 
+  group_by(date, depth) %>% 
+  mutate(n = n()) %>% 
+  ungroup()
+```
+
+
+```{r}
+#Scatter plot - colored by depth
+f1 <- chl_ctd %>% 
+  # filter(depth < 100) %>%
+  ggplot(aes(x = chl_dm, y = flu_cor_dm)) +
+  geom_point(pch = 21, fill = "darkgreen", color = "black", stroke = 1,
+             size = 3, alpha = 0.8) +
+  stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 26, size = 8) +
+  ggpubr::stat_regline_equation(label.y = 28, size = 8) +
+  annotate("text", x = 4, y = 30, label = "All Data", size = 8) +
+  xlim(0, 30) +
+  ylim(0, 30) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  theme(text = element_text(size = 20))
+
+f2 <- chl_ctd %>% 
+  filter(!depth == 1) %>%
+  ggplot(aes(x = chl_dm, y = flu_cor_dm)) +
+  geom_point(pch = 21, fill = "darkgreen", color = "black", stroke = 1,
+             size = 3, alpha = 0.8) +
+  stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 26, size = 8) +
+  ggpubr::stat_regline_equation(label.y = 28, size = 8) +
+  annotate("text", x = 5.5, y = 30, label = "No surface", size = 8) +
+  xlim(0, 30) +
+  ylim(0, 30) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  theme(text = element_text(size = 20),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank())
+
+f3 <- chl_ctd %>% 
+  filter(!depth == 1 & !chla_flag == "ADL") %>%
+  ggplot(aes(x = chl_dm, y = flu_cor_dm)) +
+  geom_point(pch = 21, fill = "darkgreen", color = "black", stroke = 1,
+             size = 3, alpha = 0.8) +
+  stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 26, size = 8) +
+  ggpubr::stat_regline_equation(label.y = 28, size = 8) +
+  annotate("text", x = 9.5, y = 30, label = "No above detection", size = 8) +
+  xlim(0, 30) +
+  ylim(0, 30) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  theme(text = element_text(size = 20),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank())
+
+fig <- f1 + f2 + f3
+
+ggsave(here("figures", "fluorescence_chl_scatter_2023-06-06.png"), fig,
+       width = 16, height = 6, dpi = 300)
+```
+
+```{r}
+#Scatter plot - colored by depth
+chl_ctd %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(depth < 100) %>%
+  filter(!is.na(ctdNum)) %>% 
+  ggplot(aes(x = chl_dm, y = flu_cor_dm, fill = as.factor(year), 
+             color = as.factor(year))) +
+  geom_point(
+             pch = 21, stroke = 1, size = 2, color = "black") +
+  stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  facet_wrap(~ctdNum) +
+  # ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 24, size = 8) +
+  # ggpubr::stat_regline_equation(label.y = 22, size = 8) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  labs(fill = "Year (m)",
+       color = "year (m)") +
+  theme(text = element_text(size = 20))
+
+ggsave(here("figures", "fluorescence_chl_scatter_year_2023-06-06.png"),
+       width = 16, height = 10, dpi = 300)
+
+```
+```{r}
+chl_ctd %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(!depth == 1) %>%
+  filter(ctdNum == 18032) %>%
+  # filter(chla_flag == "AV" | is.na(chla_flag)) %>% 
+  ggplot(aes(x = chl_dm, y = flu_cor_dm, fill = as.factor(year), 
+             color = as.factor(year))) +
+  geom_point(pch = 21, stroke = 1, size = 2, color = "black") +
+  stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  # facet_wrap(~ctdNum) +
+  ggpubr::stat_cor(aes(label = ..rr.label.., size = 8)) +
+  ggpubr::stat_regline_equation(label.x = 5, size = 8) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  labs(fill = "Year (m)",
+       color = "year (m)") +
+  theme(text = element_text(size = 20))
+
+#CTD calibrations
+#2018-06-01
+#2019-05-25
+#2021-01-07
+
+#Although the instrument sheet says the fluorometer has not been calibrated since 2018.
+
+c18032 <- chl_ctd %>% 
+  filter(ctdNum == 18032) %>% 
+  distinct(date)
+
+#2018-06-26 through 2019-03-20 - So this is all a single calibration.
+#Everything after 2021 should be a new calibration and be the same; however, 2021 and 2022 are very different relationships. 
+
+#What I need to do is get the corrected Fluorescence (without the DM) then match it with the HPLC to derive the correct cast (at least - probably don't have each depth due to single HPLC depth) and then join it with the Chlorophyll and compare.
+
+```
+
+
+
+
+```{r}
+#For each profile, determining the linear model between chlorophyll and fluorescence data.
+
+#Want to remove surface value as this will definitely degrade.
+chl_ctd <- chl_ctd %>%
+  mutate(year = lubridate::year(date))
+
+#This determines the slope and intercept of the linear model between chlorophyll and CTD fluorescence. I'm not sure yet about the output. I guess test using an individual date and 
+fitted_models_year_ctd <- chl_ctd %>%
+  filter(!is.na(chl_dm) & !is.na(flu_cor_dm)) %>%
+  filter(!depth == 1) %>% 
+  group_by(year, ctdNum) %>% 
+  do(broom::tidy(lm(flu_cor_dm ~ chl_dm, data = .))) %>% 
+  ungroup() 
+
+#Pulling out the slope rows
+slope_year_ctd <- fitted_models_year_ctd %>% 
+  filter(term == "chl_dm") %>% 
+  select(year, ctdNum, slope = estimate, std.error:p.value)
+
+#Pulling out the intercept value - removing stats as why would the intercept have stats.
+intercept_year_ctd <- fitted_models_year_ctd %>% 
+  filter(term == "(Intercept)") %>% 
+  select(year, ctdNum, intercept = estimate)
+
+fit_mod_wide_year_ctd <- slope_year_ctd %>% 
+  left_join(intercept_year_ctd) %>% 
+  relocate(intercept, .before = slope)
+
+#Determining linear model statistics - intercept set to 0
+fitted_models_r2_year_ctd <- chl_ctd %>% 
+  filter(!is.na(chl_dm) & !is.na(flu_cor_dm)) %>%
+  group_by(year, ctdNum) %>%  
+  do(broom::glance(lm(flu_cor_dm ~ chl_dm, data = .))) %>% 
+  ungroup() %>% 
+  arrange(year) %>% 
+  select(year, ctdNum, r2 = adj.r.squared, nobs) %>% 
+  mutate_at(vars(r2), funs(round(., 5)))
+
+fit_mod_wide_year_ctd <- fit_mod_wide_year_ctd %>% 
+  left_join(fitted_models_r2_year_ctd)
+```
+```{r}
+
+```
+
+
+
+
+
+```{r}
+#Scatter plot - colored by depth
+chl_ctd %>% 
+  filter(depth < 100) %>%
+  ggplot(aes(x = chl_dm, y = flu_cor_dm, fill = as.factor(depth),
+             color = as.factor(depth))) +
+  geom_point(pch = 21, stroke = 1, size = 2, color = "black") +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  # geom_smooth(method = "lm") +
+  stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  # ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 24, size = 8) +
+  # ggpubr::stat_regline_equation(label.y = 22, size = 8) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  labs(fill = "Depth (m)",
+       color = "Depth (m)") +
+  theme(legend.position = c(0.1, 0.8),
+        text = element_text(size = 20))
+
+ggsave(here("figures", "fluorescence_chl_scatter_depth.png"),
+       width = 8, height = 6, dpi = 300)
+
+```
+```{r}
+#Scatter plot - colored by depth
+chl_ctd %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(depth < 100 & depth > 1) %>%
+  ggplot(aes(x = chl_dm, y = flu_cor_dm, fill = as.factor(depth),
+             color = as.factor(depth))) +
+  geom_point(pch = 21, stroke = 1, size = 2, color = "black") +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  facet_wrap(~ year) +
+  # geom_smooth(method = "lm") +
+  # stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  # ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 24, size = 8) +
+  # ggpubr::stat_regline_equation(label.y = 22, size = 8) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  labs(fill = "Depth (m)",
+       color = "Depth (m)") +
+  theme(legend.position = c(0.40, 0.15),
+        text = element_text(size = 20))
+
+ggsave(here("figures", "fluorescence_chl_scatter_depth_year.png"),
+       width = 12, height = 10, dpi = 300)
+
+```
+```{r}
+test <- chl_ctd %>% 
+  filter(depth < 100 & depth > 1 & date > "2021-01-01") %>% 
+  mutate(diff = chl_dm/flu_cor_dm)
+```
+
+
+
+
+```{r}
+#Scatter plot - faceting by depth
+chl_ctd %>% 
+  # filter(depth < 100) %>% 
+  ggplot(aes(x = chl_dm, y = flu_cor_dm)) +
+  geom_point(pch = 21, fill = "darkgreen", color = "black", stroke = 1,
+             size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", color = "black") +
+  geom_abline(slope = 1, intercept = 0) +
+  ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 24, size = 8) +
+  ggpubr::stat_regline_equation(label.y = 22, size = 8) +
+  facet_wrap(~ depth) +
+  theme_bw() +
+  ylab("CTD Fluorescence (ug/L)") +
+  xlab("Chlorophyll (ug/L)") +
+  theme(text = element_text(size = 30))
+
+ggsave(here("figures", "fluorescence_chl_facet_depth.png"),
+       width = 16, height = 12, dpi = 300)
+
+```
+
+```{r}
+#These plots do suggest a quenching effect at 5m depth. Although, there are other issues. At 5m depth, the comparison between the two values is the best. Deeper, fluorescence begins to overestimate chlorophyll pretty considerably.
+```
+
+```{r}
+#What are we missing by removing the surface. Is 5m representative of 1m?
+chl_ctd %>%
+  filter(depth == 1 | depth == 5) %>% 
+  select(date, depth, chl_dm) %>%
+  group_by(date, depth) %>% 
+  summarise(chl_dm = mean(chl_dm)) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = "depth", names_prefix = "dep",
+              values_from = "chl_dm") %>%
+  ggplot(aes(x = dep1, y = dep5)) +
+  geom_point(pch = 21, fill = "darkgreen", color = "black", stroke = 1,
+             size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", color = "black") +
+  geom_abline(slope = 1, intercept = 0) +
+  ggpubr::stat_cor(aes(label = ..rr.label..), label.y = 29, size = 8) +
+  ggpubr::stat_regline_equation(label.y = 26, size = 8) +
+  theme_bw() +
+  xlim(0, 30) +
+  ylim(0, 30) +
+  ylab("Chlorophyll (1m, ug/L)") +
+  xlab("Chlorophyll (5m, ug/L)") +
+  theme(text = element_text(size = 30))
+
+ggsave(here("figures", "chl_1_5m_comparison.png"),
+       width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+#For each profile, determining the linear model between chlorophyll and fluorescence data.
+
+#Want to remove surface value as this will definitely degrade.
+
+
+#This determines the slope and intercept of the linear model between chlorophyll and CTD fluorescence. I'm not sure yet about the output. I guess test using an individual date and 
+fitted_models <- chl_ctd %>% 
+  filter(!is.na(chl_dm) & !is.na(flu_cor_dm)) %>%
+  filter(!depth == 1) %>% 
+  group_by(date) %>% 
+  do(broom::tidy(lm(chl_dm ~ flu_cor_dm, data = .))) %>% 
+  ungroup() %>% 
+  arrange(date)
+
+#Pulling out the slope rows
+slope <- fitted_models %>% 
+  filter(term == "flu_cor_dm") %>% 
+  select(date, slope = estimate, std.error:p.value)
+
+#Pulling out the intercept value - removing stats as why would the intercept have stats.
+intercept <- fitted_models %>% 
+  filter(term == "(Intercept)") %>% 
+  select(date, intercept = estimate)
+
+fit_mod_wide <- slope %>% 
+  left_join(intercept) %>% 
+  relocate(intercept, .before = slope)
+
+#Determining linear model statistics - intercept set to 0
+fitted_models_r2 <- chl_ctd %>% 
+  filter(!is.na(chl_dm) & !is.na(flu_cor_dm)) %>%
+  group_by(date) %>%  
+  do(broom::glance(lm(chl_dm ~ flu_cor_dm, data = .))) %>% 
+  ungroup() %>% 
+  arrange(date) %>% 
+  select(date, r2 = adj.r.squared, nobs) %>% 
+  mutate_at(vars(r2), funs(round(., 5)))
+
+fit_mod_wide <- fit_mod_wide %>% 
+  left_join(fitted_models_r2)
+```
+```{r}
+#Now looking at what the linear model statistics are showing in terms of strength of relatationship etc.
+
+#How many profiles with different n for each model
+#Strength of relationships.
+
+#Number of days with 3 or less chlorophyll samples - 9 of 239 records. Probably not worth trying to calibrate on three or less points - although two of the 3 point comparisons have high r2 (> 0.60). Maybe these could be salvedged.
+fit_mod_ln3 <- fit_mod_wide %>% 
+  filter(nobs <= 3)
+  
+
+#8 of 239 daily relationships have negative trends even with > 3 calibration points - need to look into these for both the CTD profile and the Chlorophyll data as it could indicate poor data.
+fit_mod_neg <- fit_mod_wide %>% 
+  filter(nobs > 3 & r2 <= 0)
+
+#Just breaking down number of samples with certain r2 values
+
+#Out of 239 profiles - 90 profiles have a r2 > 0.80
+fit_mod_gt80 <- fit_mod_wide %>% 
+  filter(nobs > 3 & r2 >= 0.80 & p.value < 0.05)
+
+#133 r2 > 0.70
+fit_mod_gt70 <- fit_mod_wide %>% 
+  filter(nobs > 3 & r2 >= 0.70 & p.value < 0.05)
+
+#160 r2 > 0.60
+fit_mod_gt60 <- fit_mod_wide %>% 
+  filter(nobs > 3 & r2 >= 0.60 & p.value < 0.05)
+
+#173 r2 > 0.50
+fit_mod_gt50 <- fit_mod_wide %>% 
+  filter(nobs > 3 & r2 >= 0.50 & p.value < 0.05)
+
+```
+
+```{r}
+#Making a histogram to show the above r2 distribution 
+f1 <- fit_mod_wide %>% 
+  filter(nobs > 3 & r2 > 0) %>% 
+  ggplot(aes(x = r2)) +
+  geom_histogram(binwidth = 0.10, fill = "blue", color = "black", alpha = 0.5) +
+  stat_bin(aes(y = ..count.., label = ..count..), binwidth = 0.10,
+           geom = "text", vjust = -.5) +
+  ylim(0, 70) +
+  scale_x_continuous(breaks = seq(0, 1.00, by = 0.10)) +
+  # scale_y_continuous(breaks = seq(0, 60, by = 10)) +
+  xlab("r2") +
+  ylab("Count") +
+  theme_bw() +
+  annotate("text", x = 0.25, y = 60, label = "No surface, n > 3", size = 8) +
+  theme(text = element_text(size = 20))
+
+#Making a histogram to show the above r2 distribution 
+f2 <- fit_mod_wide %>% 
+  filter(nobs > 3 & r2 > 0.60) %>% 
+  ggplot(aes(x = slope)) +
+  geom_histogram(binwidth = 0.2, fill = "red", color = "black", alpha = 0.5) +
+  stat_bin(aes(y = ..count.., label = ..count..), binwidth = 0.20,
+           geom = "text", vjust = -.5) +
+  ylim(0, 70) +
+  scale_x_continuous(breaks = seq(0, 4, by = 0.20)) +
+  # scale_y_continuous(breaks = seq(0, 60, by = 10)) +
+  xlab("Slope") +
+  theme_bw() +
+  annotate("text", x = 1.3, y = 60, label = "Flu = m(Chl) + b", size = 8) +
+  annotate("text", x = 1.3, y = 55, label = "No surface, n > 3, r2 > 0.60",
+           size = 8) +
+  theme(text = element_text(size = 20),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank())
+
+fig <- f1 + f2
+
+ggsave(here("figures", "histogram_r2_slope_2023-06-07.png"), fig,
+       width = 16, height = 6, dpi = 300)
+```
+
+```{r}
+#Making a histogram to show the above r2 distribution 
+fit_mod_wide %>% 
+  filter(nobs > 3 & r2 > 0.60) %>% 
+  ggplot(aes(x = slope)) +
+  geom_histogram(binwidth = 0.2, fill = "blue", color = "black", alpha = 0.5) +
+  stat_bin(aes(y = ..count.., label = ..count..), binwidth = 0.20,
+           geom = "text", vjust = -.5) +
+  scale_x_continuous(breaks = seq(0, 4, by = 0.20)) +
+  scale_y_continuous(breaks = seq(0, 60, by = 10)) +
+  ylab("Slope") +
+  theme_bw() +
+  annotate("text", x = 1.3, y = 50, label = "No surface, n > 3, r2 > 0.60",
+           size = 8) 
+
+
+```
+
+
+```{r}
+
+
+prof_qc2_dm_slope <- prof_qc2_dm %>% 
+  left_join(fit_mod_wide)
+
+prof_qc2_dm_slope <- prof_qc2_dm_slope %>% 
+  mutate(flu_slope = flu_cor_dm*slope)
+
+int_slope_dm <- prof_qc2_dm_slope %>%
+  filter(depth > 2 & depth < 101) %>% 
+  group_by(date) %>% 
+  summarise(int_100_dm = sum(flu_cor_dm, na.rm = TRUE),
+         int_100_dm_slope = sum(flu_slope, na.rm = TRUE)) %>% 
+  ungroup()
+
+```
+```{r}
+chl_ctd %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(year == 2022 & !depth == 1) %>% 
+  ggplot(aes(x = chl_dm, y = flu_cor_dm)) +
+  geom_point() +
+  stat_smooth(method = lm) +
+  geom_abline(slope = 1, intercept = 0) +
+  ggpubr::stat_cor(aes(label = ..rr.label..),
+                   size = 8) +
+  facet_wrap(~date, scales = "free")
+
+ggsave(here("figures", "scatter_2022.png"),
+       width = 20, height = 20, dpi = 300)
+
+#2016-04-14 #negative relationship
+#2016-07-21 #potential quenching at 5m depth
+#2016-08-11 #just a poor relationship
+
+```
+
+
+
+
+```{r}
+int_slope_dm %>% 
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = int_100_dm)) +
+  geom_point(aes(y = int_100_dm_slope)) +
+  theme_bw()
+```
+
+
+
+```{r}
+#Looking at some of the profiles with negative relationships.
+
+#2017-11-27
+bad_match_flu1 <- prof_qc2_dm %>% 
+  filter(date == "2017-11-27")
+
+bad_match_chl1 <- chl_qc1_dm %>% 
+  filter(date == "2017-11-27") 
+
+bad_match_1 <- bad_match_flu1 %>% 
+  left_join(bad_match_chl1)
+
+
+#It's not that the data or trends are bad here, there's just low biomass and a small dynamic range where matches exist.
+bad_match_1 %>% 
+  ggplot() +
+  geom_point(aes(x = flu_cor_dm, y = depth)) +
+  geom_point(aes(x = chl_dm, y = depth), color = "red") +
+  scale_y_reverse() +
+  ylim(100, 0)
+```
+
+```{r}
+#Looking at some of the profiles with negative relationships.
+
+#2017-11-27
+bad_match_flu2 <- prof_qc2_dm %>% 
+  filter(date == "2016-08-01")
+
+bad_match_chl2 <- chl_qc1_dm %>% 
+  filter(date == "2016-08-01") 
+
+bad_match_2 <- bad_match_flu2 %>% 
+  left_join(bad_match_chl2)
+
+#Is this an NPQ issue??? Possible. The surface is in the boat shadow, but even at 5m depth PAR is > 200. Even the 100m depth match looks off though, which is quite strange.
+bad_match_2 %>% 
+  ggplot() +
+  geom_point(aes(x = flu_cor_dm, y = depth)) +
+  geom_point(aes(x = chl_dm, y = depth), color = "red") +
+  scale_y_reverse() +
+  ylim(100, 0)
+```
+
+```{r}
+#Looking at some of the profiles with negative relationships.
+
+#2018-07-31
+bad_match_flu3 <- prof_qc2_dm %>% 
+  filter(date == "2018-07-31")
+
+bad_match_chl3 <- chl_qc1_dm %>% 
+  filter(date == "2018-07-31") 
+
+bad_match_3 <- bad_match_flu3 %>% 
+  left_join(bad_match_chl3)
+
+#The 30m point is the issue here - coupled with the fact that the other 3 points (surface not used) are in low and similar biomass depths with the chl max being missed. I wonder if the SF sum is comparable to the bulk at 30m depth. Definitely close at 0.41.
+bad_match_3 %>% 
+  ggplot() +
+  geom_point(aes(x = flu_cor_dm, y = depth)) +
+  geom_point(aes(x = chl_dm, y = depth), color = "red") +
+  scale_y_reverse() +
+  ylim(100, 0)
+```
+
+```{r}
+#Looking at some of the profiles with negative relationships.
+
+#2016-08-11
+bad_match_flu4 <- prof_qc2_dm %>% 
+  filter(date == "2016-08-11")
+
+bad_match_chl4 <- chl_qc1_dm %>% 
+  filter(date == "2016-08-11") 
+
+bad_match_4 <- bad_match_flu4 %>% 
+  left_join(bad_match_chl4)
+
+#Something definitely seems up with the 20, 30 and 100m chlorophyll here. Wouldn't be a quenching issue.
+bad_match_4 %>% 
+  ggplot() +
+  geom_point(aes(x = flu_cor_dm, y = depth)) +
+  geom_point(aes(x = chl_dm, y = depth), color = "red") +
+  scale_y_reverse() +
+  ylim(100, 0)
+```
+
+```{r}
+#Where do you go from here? I could do a daily average, but some of these are very different. I guess I could look at the chl data and decide from there.
+```
+
+```{r}
+#Example of how to use tidyverse to create spline fits.
+
+# https://stackoverflow.com/questions/34687142/interpolating-a-spline-within-dplyr
+```
+
+```{r}
+prof %>% 
+  filter(date == "2019-03-12" | date == "2021-02-23" | 
+           date == "2021-03-26") %>% 
+  ggplot(aes(x = flu, y = pres, fill = as.factor(date))) +
+  geom_point(pch = 21, size = 3, color = "black") +
+  scale_fill_brewer(palette = "Dark2") +
+  scale_y_reverse() +
+  theme_bw() +
+  ylim(100, 0)
+
+```
+```{r}
+prof_qc2 %>% 
+  mutate(month = lubridate::month(date)) %>% 
+  ggplot(aes(x = flu, y = pres, color = as.factor(month))) +
+  geom_point(size = 4, alpha = 0.4) +
+  scale_color_brewer(palette = "Spectral") +
+  geom_hline(yintercept = 3) +
+  geom_hline(yintercept = 100) +
+  scale_y_reverse() +
+  labs(x = "Fluorescence (ug/L)",
+       y = "Depth (m)",
+       color = "Month") +
+  theme_bw() +
+  ylim(200, 0) + 
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "profiles.png"), 
+       width = 5, height = 12, dpi = 300)
+```
+
+
+```{r}
+write_csv(int_1_dm, here("outputs", "qu39_integrated_3-100_dm_2023-06-07.csv"))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

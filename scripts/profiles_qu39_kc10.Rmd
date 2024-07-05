@@ -1,0 +1,504 @@
+
+Plotting median profiles of fluorescence and physical parameters
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+library(scales)
+library(ggpmisc)
+```
+
+```{r}
+#I'm not quite sure where these come from
+
+k <- read.csv(here("outputs", "kc10_profs_qc1.csv"))
+
+q <- read.csv(here("outputs", "qu39_profs_qc1.csv"))
+
+b <- read.csv(here("files", "2024-07-05.1daySamples.all.csv"))
+
+r <- read.csv(here("files", "daily_20240705T2210.csv"))
+
+```
+
+```{r}
+ctd <- rbind(k, q)
+```
+
+```{r}
+ctd <- ctd %>% 
+  mutate(date = lubridate::ymd(date),
+         month = lubridate::month(date)) %>%
+  mutate(season = case_when(month == 12 | month == 1 | month == 2 ~ "Winter",
+                            month >= 3 & month <= 5 ~ "Spring",
+                            month >= 6 & month <= 8 ~ "Summer",
+                            month >= 9 & month <= 11 ~ "Autumn",)) %>%
+  relocate(season, .after = month)  
+  
+#Order locations from fjord to shelf
+order_loc_seas <- c("Winter", "Spring", "Summer", "Autumn")
+
+#Chemtax - Specify order of phyto groups for figures
+ctd <- arrange(mutate(ctd,
+                         season = factor(season, levels = order_loc_seas)))
+
+
+```
+
+```{r}
+b_less <- b %>% 
+  mutate(date = lubridate::mdy(date)) %>% 
+  select(date, year, month, WaterSalinity_QC,
+         sal = WaterSalinity_Avg) %>% 
+  filter(WaterSalinity_QC == "AV" | WaterSalinity_QC == "")
+```
+
+```{r}
+r_less <- r %>% 
+  mutate(date = lubridate::mdy(Date),
+         year = lubridate::year(date)) %>% 
+  filter(PARAM == 1) %>% 
+  filter(year > 2014)
+```
+
+
+
+```{r}
+ctd_stat <- ctd %>%
+  group_by(station, season, pres) %>% 
+  summarise(med_flu = median(flu, na.rm = T),
+            sd_flu = sd(flu, na.rm = T),
+            med_s = median(sal, na.rm = T),
+            sd_s = sd(sal, na.rm = T),
+            med_t = median(temp, na.rm = T),
+            sd_t = sd(temp, na.rm = T),
+            min_s = min(sal, na.rm = T),
+            max_s = max(sal, na.rm = T),
+            min_t = min(temp, na.rm = T),
+            max_t = max(temp, na.rm = T)) %>% 
+  ungroup()
+
+ctd_stat_2m <- ctd_stat %>%
+  filter(pres == 2)
+```
+
+```{r}
+formatter <- function(...){
+  function(x) format(round(x, 1), ...)
+}
+```
+
+
+```{r}
+ggplot() +
+  # geom_hline(yintercept = 1, linetype = "dotted") +
+  # geom_hline(yintercept = 5, linetype = "dotted") +
+  # geom_hline(yintercept = 10, linetype = "dotted") +
+  # geom_hline(yintercept = 20, linetype = "dotted") +
+  # geom_hline(yintercept = 30, linetype = "dotted") +
+  geom_smooth(data = ctd_stat, aes(x = med_flu, y = pres, fill = station, color = station),
+              orientation = "y", method = "loess", span = 0.2, se = F,
+              alpha = 0.4, size = 2) +
+  geom_point(data = ctd_stat, aes(x = med_flu, y = pres, color = station),
+              alpha = 0.4, size = 3) +
+  # geom_errorbarh(data = ctd_stat, aes(x = med_flu,
+  #                                     xmin = med_flu - sd_flu,
+  #                                     xmax = med_flu - sd_flu, 
+  #                                     y = pres,
+  #                                     color = station),
+  #                position = position_dodge(0.3)) +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(x = "Fluorescence (ug/L)",
+       y = "Depth (m)") +
+  scale_y_reverse() +
+  ylim(50, 1) +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, 0), 
+                     labels = formatter(nsmall = 1)) +
+  facet_grid(.~season, scales = "free_x") +
+  # ggtitle("Seasonal Profiles") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        legend.position = c(0.07, 0.95),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "profile_season_leoss_both_median.png"),
+       width = 20, height = 12, dpi = 300)
+```
+
+
+
+```{r}
+ctd_stat %>%
+  ggplot() +
+  geom_smooth(data = ctd_stat, aes(x = med_s, y = pres, fill = station, color = station),
+              orientation = "y", method = "loess", span = 0.2, se = F,
+              alpha = 0.4, size = 2) +
+  geom_point(data = ctd_stat, aes(x = med_s, y = pres, color = station),
+              alpha = 0.4, size = 2) +
+  geom_ribbon(data = ctd_stat, aes(xmin = med_s - sd_s, xmax = med_s + sd_s,
+                                     y = pres, fill = station, color = station),
+              alpha = 0.4, size = 0.1) +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(x = "Salinity",
+       y = "Depth (m)") +
+  scale_y_reverse() +
+  ylim(40, 1) +
+  facet_grid(. ~ season) +
+  xlim(22, 35) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "profile_season_leoss_both_sal.png"),
+       width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+ctd_stat %>%
+  ggplot() +
+  geom_smooth(data = ctd_stat, aes(x = med_t, y = pres, fill = station, color = station),
+              orientation = "y", method = "loess", span = 0.2, se = F,
+              alpha = 0.4, size = 2) +
+  geom_point(data = ctd_stat, aes(x = med_t, y = pres, color = station),
+              alpha = 0.4, size = 2) +
+  geom_ribbon(data = ctd_stat, aes(xmin = med_t - sd_t, xmax = med_t + sd_t,
+                                     y = pres, fill = station, color = station),
+              alpha = 0.4, size = 0.1) +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(x = "Temp",
+       y = "Depth (m)") +
+  scale_y_reverse() +
+  ylim(40, 1) +
+  facet_grid(. ~ season) +
+  # ggtitle("Seasonal Profiles") +
+  # xlim(22, 35) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "profile_season_leoss_both_temp.png"),
+       width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+ctd_stat %>%
+  ggplot() +
+  geom_smooth(data = ctd_stat, aes(x = med_flu, y = pres, fill = station, color = station),
+              orientation = "y", method = "loess", span = 0.1, se = F,
+              alpha = 0.4, size = 2) +
+  geom_point(data = ctd_stat, aes(x = med_flu, y = pres, color = station),
+              alpha = 0.4, size = 2) +
+  geom_ribbon(data = ctd_stat, aes(xmin = med_flu - sd_flu, xmax = med_flu + sd_flu,
+                                     y = pres, fill = station, color = station),
+              alpha = 0.4, size = 0.1) +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(x = "Temp",
+       y = "Depth (m)") +
+  scale_y_reverse() +
+  ylim(40, 1) +
+  facet_grid(. ~ season, scales = "free_x") +
+  # ggtitle("Seasonal Profiles") +
+  # xlim(22, 35) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "profile_season_leoss_both_fluorescence.png"),
+       width = 16, height = 12, dpi = 300)
+```
+```{r}
+#Look at seasonal cycle for each station.
+
+ctd %>% 
+  filter(pres == 2 & year > 2014) %>%
+  group_by(month, station) %>% 
+  summarise(med_sal = median(sal),
+            sd_sal = sd(sal)) %>% 
+  ungroup() %>% 
+  mutate(year = 2022,
+         day = 15) %>% 
+  unite(month, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(month = lubridate::ymd(month)) %>% 
+  ggplot(aes(x = month, y = med_sal, color = station)) +
+  geom_line(size = 1.5) +
+  geom_point(pch = 21, size = 2, fill = "white", stroke = 0.5) +
+  geom_ribbon(aes(ymin = med_sal - sd_sal,
+                  ymax = med_sal + sd_sal,
+                  x = month,
+                  color = station,
+                  fill = station),
+              alpha = 0.4, size = 0.1) +
+  scale_x_date(breaks = seq(as.Date("2022-01-01"), as.Date("2022-12-31"),
+                            by = "month"),
+               date_labels = "%b") +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(y = "Salinity") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "climatology_salinity_2m_monthly_median.png"),
+       width = 16, height = 6, dpi = 300)
+```
+```{r}
+#Look at seasonal cycle for each station.
+
+ctd %>% 
+  filter(pres == 2 & year > 2014) %>%
+  ggplot(aes(x = as.factor(month), y = sal, color = station, fill = station)) +
+  geom_boxplot(alpha = 0.3) +
+  geom_point(aes(color = station, fill = station), 
+             position = position_dodge(width = 0.75),
+             alpha = 0.4) +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(y = "Salinity") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "climatology_salinity_2m_monthly_boxplot.png"),
+       width = 16, height = 6, dpi = 300)
+```
+
+
+
+```{r}
+#Look at seasonal cycle for each station.
+
+ctd %>% 
+  filter(pres == 2 & year > 2014) %>%
+  mutate(yday = lubridate::yday(date)) %>% 
+  mutate(month_doy = as.Date("2021-12-31") + yday) %>% 
+  ggplot(aes(x = month_doy, y = sal, color = station)) +
+  geom_point(alpha = 0.5, size = 4) +
+  geom_smooth(span = 0.3, size = 2) +
+  scale_x_date(breaks = seq(as.Date("2022-01-01"), as.Date("2022-12-31"),
+                            by = "month"),
+               date_labels = "%b") +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(y = "Salinity") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "climatology_salinity_2m_monthly_leoss-3.png"),
+       width = 16, height = 6, dpi = 300)
+```
+```{r}
+test <- ctd %>% 
+  mutate(yday = lubridate::yday(date)) %>% 
+  mutate(month.doy = as.Date("2021-12-31") + yday)
+```
+
+
+
+
+```{r}
+ctd_dm <- ctd %>% 
+  filter(pres == 2 & year > 2014) %>% 
+  group_by(date, station) %>% 
+  summarise(sal = mean(sal)) %>% 
+  ungroup() 
+
+ggplot() +
+  geom_point(data = b_less, aes(x = date, y = sal),
+             size = 3, alpha = 0.1, color = "blue", fill = "blue", pch = 21) +
+  geom_line(data = ctd_dm, aes(x = date, y = sal, color = station), size = 1.5) +
+  geom_point(data = ctd_dm, aes(x = date, y = sal, color = station),
+             pch = 21, size = 2, fill = "white", stroke = 0.5) +
+  ggsci::scale_color_aaas() +
+  ylim(15, 32) +
+  labs(y = "Salinity") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "timeseries_salinity_2m_raw.png"),
+       width = 16, height = 6, dpi = 300)
+```
+
+```{r}
+ctd %>% 
+  filter(pres == 2 & year > 2014) %>% 
+  mutate(year = lubridate::year(date)) %>%
+  group_by(year, month, station) %>% 
+  summarise(med_sal = median(sal, na.rm = T),
+            sd_sal = sd(sal, na.rm = T),
+            n = n()) %>% 
+  ungroup() %>% 
+  mutate(day = 15) %>% 
+  unite(date, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date = lubridate::ymd(date)) %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = med_sal, color = station), size = 1.5) +
+  geom_point(aes(x = date, y = med_sal, color = station),
+             pch = 21, size = 2, fill = "white", stroke = 0.5) +
+  geom_ribbon(aes(ymin = med_sal - sd_sal,
+                  ymax = med_sal + sd_sal,
+                  x = date,
+                  color = station,
+                  fill = station),
+              alpha = 0.4, size = 0.1) +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(y = "Salinity") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "timeseries_salinity_2m_month.png"),
+       width = 16, height = 6, dpi = 300)
+```
+
+```{r}
+ctd %>% 
+  filter(pres == 2 & year > 2014) %>% 
+  ggplot(aes(x = as.factor(year), y = sal, color = station, fill = station)) +
+  geom_boxplot(alpha = 0.3) +
+  geom_point(aes(color = station, fill = station), 
+             position = position_dodge(width = 0.75),
+             alpha = 0.4) +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(y = "Salinity") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "timeseries_salinity_2m_annual_boxplot.png"),
+       width = 16, height = 6, dpi = 300)
+```
+```{r}
+ctd %>% 
+  filter(pres == 2 & year > 2014) %>% 
+  ggplot(aes(x = as.factor(year), y = sal, color = station, fill = station)) +
+  geom_boxplot(alpha = 0.3) +
+  geom_point(aes(color = station, fill = station), 
+             position = position_dodge(width = 0.75),
+             alpha = 0.4) +
+  facet_grid(season ~ ., scales = "free_x") +
+  ggsci::scale_color_aaas() +
+  ggsci::scale_fill_aaas() +
+  labs(y = "Salinity") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "timeseries_salinity_2m_annual_boxplot_season.png"),
+       width = 16, height = 14, dpi = 300)
+```
+
+```{r}
+ctd %>% 
+  filter(pres == 2 & year > 2014) %>% 
+  group_by(date, station) %>% 
+  summarise(temp = mean(temp)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = date, y = temp, color = station)) +
+  geom_line(size = 1.5) +
+  geom_point(pch = 21, size = 2, fill = "white", stroke = 0.5) +
+  ggsci::scale_color_aaas() +
+  labs(y = "Temp") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "timeseries_temp_2m_raw.png"),
+       width = 16, height = 6, dpi = 300)
+```
+
+```{r}
+#How well does buoy CTD match with field CTD?
+
+ctd_dm %>% 
+  rename(sal_ctd = sal) %>% 
+  left_join(b_less) %>% 
+  filter(sal > 15) %>% 
+  ggplot(aes(x = sal_ctd, sal)) +
+  geom_point()
+
+#I theory should be spot on.
+#Likely off because:
+
+#Including some bad data;
+#different depths;
+#joining based on daily average of the buy data and probably a lot of daily variability. Need to join by time. 
+```
+
+```{r}
+#How well does salinity align with river discharge over this period? Do my relationships hold?
+```
+
+
+
+
+
+
+
+
+

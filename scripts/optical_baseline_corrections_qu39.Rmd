@@ -1,0 +1,234 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#I guess in reality, I should go through each optical sensor and QC so that I can develop seasonal averages. For now, see if this works and plot T, S and Fluorescence.
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+library(scales)
+library(ggpmisc)
+
+```
+
+```{r}
+#Downloading data - I need to download new versions of both QU24 and QU39 as changes made to the portal making it hard to bind the files.
+
+#Download CTD data - entire QU39 data-set
+ctd <- read.csv(here("files_big", "ctd_2015_2023.csv"))
+
+```
+
+```{r}
+#Wrangling CTD profiles data
+prof <- ctd %>%
+  filter(Cast.Direction == "d") %>% 
+  mutate(date = lubridate::date(Measurement.time)) %>%
+  mutate(year = lubridate::year(Measurement.time)) %>%
+  select(castpk = Cast.PK, hakai_id = Hakai.ID, Cruise, ctdNum = CTD.serial.number,
+         station = Station, lat = Latitude,
+         long = Longitude, time = Measurement.time, date, year,
+         dep = Depth..m., pres = Pressure..dbar.,
+         flu = Fluorometry.Chlorophyll..ug.L., sal = Salinity..PSU., 
+         temp = Temperature..deg.C.)
+```
+
+```{r}
+#Determining total number of profiles
+prof_num <- prof %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+
+#289 profiles from QU39 profiles + 11 profiles from QU24. Now it's saying 507 profiles - I think I made a mistake earlier
+```
+
+```{r}
+#creating cast number to organize plotting profiles
+prof <- prof %>% 
+group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+```
+
+```{r}
+#Lists of questionable profiles - bad data or profile starts deeper than 3m depth. I should separate the profiles that start deeper in case some can be saved -  don't need to be removed with bad data casts.
+
+prof_check_list <- c(258, #Needs further investigation - SVD flag for CTD parameters - REMOVE
+                     706, #Only goes to about 60m - Keep depending on integration depth. Righ now 100m.
+                     754, #Starts deep - REMOVE
+                     761, #Starts deep - REMOVE
+                     798, #starts deep - REMOVE
+                     965, #starts deep, but only at 4m. REMOVE for now.
+                     1076, #starts deep - REMOVE
+                     6838, #Really weird profile
+                     7031, #Really weird profile
+                     7066, #All following have high offset and bad data - REMOVE
+                     7086, 
+                     7102, 
+                     7111, 
+                     7119, 
+                     7123,
+                     7135, 
+                     7145, 
+                     7161, 
+                     7162, 
+                     7176, 
+                     7184, 
+                     7189, 
+                     7202, 
+                     7203, 
+                     7204, 
+                     8531, #Large spike among very low values. Will skew integration. REMOVE?
+                     9558, #starts deep - REMOVE
+                     10964, #Bad cast, not sure why not removed from initial investigation
+                     10982, #Not sure why this wasn't deleted...
+                     13377, #High offset and much higher than chl - REMOVE
+                     13712, #Saturated - REMOVE as not representative.
+                     16083, #Very shallow cast - REMOVE
+                     17453, #Very high surface spike - 3x > profile. Real? Not supported by Chl - REMOVE?
+                     18685) #Shallow cast. 
+
+#Look at 8532. looks like there are duplicate records.
+
+```
+
+
+```{r}
+#For now, I am removing the above list of profiles, but this needs to be reviewed as some may be salvagable. 
+
+prof_qc1 <- prof %>% 
+  filter(!(castpk %in% prof_check_list)) 
+
+#I am also removing records that have zero or negative values. I investigated these and they are from the seabird CTDs and result in a poor dark count as they pull the mean down. 
+
+#there are still values that go very low that are not being removed. Need to look at these. I think removing flu values that are < 0.01 will target most of these - they are all from 7674 and deep. This helped, but still some downspikes -  if I raise the threshhold then it starts to include some surface values from 80217 that were very low - probably either had air/bubbles or strong NPQ.
+
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu, which( flu < 0), NA),
+         flu = replace(flu, which( flu == 0), NA),
+         flu = replace(flu, which( flu < 0.01), NA))
+
+#this is where my NAs are coming from.
+```
+
+```{r}
+#Continuing on with dark count analysis - Could do this in a similar way that I did in Jen's paper -  used an average of values deeper than 250 m. Although I'm not sure that all casts go this deep. 
+
+#Checking the min and max depth of each profile so I can see what depth range I could use for dark offsets
+prof_dep <- prof_qc1 %>% 
+  group_by(castpk) %>% 
+  summarise(min_dep = min(pres),
+            max_dep = max(pres)) %>%
+  ungroup() 
+
+#For now, I am going to eliminate profiles that are shallower than 100m. It is hard to derive a dark value for these profiles and I'm not sure that they are deep enough to incorporate. I will do analysis to asses and if useable, then I will subtract the offsets from prior/post casts.
+prof_shallow <- prof_dep %>% 
+  filter(max_dep < 100)
+
+#List of shallow casts to remove.
+prof_shallow_list <- prof_shallow$castpk
+
+#Removing shallow casts.
+prof_qc1 <- prof_qc1 %>% 
+  filter(!castpk %in% prof_shallow_list)
+```
+
+
+```{r}
+#To start - trying to find lowest 20 values and then averaging these to derive a dark value.
+
+#I remove profiles that didn't extend past 100m. I am going to use 50m as a threshold for the selection of the 20 dark values for averaging. I was using 100m, but there was one profile that had a minima between 50-100m. This minima was slightly lower than the deeper waters, so doesn't make a huge difference, but good to target the lowest values.
+prof_20 <- prof_qc1 %>%
+  group_by(castpk) %>%
+  filter(pres > 100 & min_rank((flu)) <= 10) %>% 
+  group_by(castpk) %>% 
+  mutate(min_flu = min(flu),
+         max_flu = max(flu),
+         min_mean = mean(flu),
+         min_std = sd(flu),
+         min_dep = min(pres),
+         max_dep = max(pres)) %>% 
+  ungroup()
+
+#Selecting distinct dark mean values for each cast pk - two profiles where both the min and max dark value was derived shallow than 100 m (7031). 
+prof_20_means <- prof_20 %>% 
+  distinct(castpk, .keep_all = TRUE) %>% 
+  select(castpk, ctdNum, station, date, min_flu, max_flu, min_mean, min_std,
+         min_dep, max_dep)
+
+```
+
+```{r}
+
+#Looking into the different cruises performed
+ctd_cruise <- prof_qc1 %>% 
+  distinct(Cruise)
+
+#Creating a list of surveys that I am pretty confident do not match with the bottle samples
+cruise_exclude <- c("Reconnaissance", "NOAA", "PICES", "BIOSIEGE",
+                    "ZOOPSPRINT", "MARIA", "anomaly_cors",
+                    "GLIDER CAMP DEPLOYMENT DAY")
+
+#Filtering out cruises in the above list to hopefully limit some of the duplicates
+prof_qc1 <- prof_qc1 %>% 
+  filter(!Cruise %in% cruise_exclude)
+
+#checking that the correct cruises were retained.
+ctd_cruise_check <- prof_qc1 %>%
+  distinct(Cruise)
+
+
+```
+
+```{r}
+write.csv(prof_qc1, here("outputs", "qu39_profs_qc1.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
