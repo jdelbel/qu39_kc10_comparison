@@ -14,12 +14,19 @@ library(ggpmisc)
 ```{r}
 #I'm not quite sure where these come from
 
+#KC10 profiles
 k <- read.csv(here("outputs", "kc10_profs_qc1.csv"))
 
+#QU39 profiles
 q <- read.csv(here("outputs", "qu39_profs_qc1.csv"))
 
+#Buoy data daily
 b <- read.csv(here("files", "2024-07-05.1daySamples.all.csv"))
 
+#bouy data hourly
+bh <- read.csv(here("files", "2024-07-19.1hourSamples.all.csv"))
+
+#Wannock daily discharge
 r <- read.csv(here("files", "daily_20240705T2210.csv"))
 
 ```
@@ -54,6 +61,12 @@ b_less <- b %>%
   select(date, year, month, WaterSalinity_QC,
          sal = WaterSalinity_Avg) %>% 
   filter(WaterSalinity_QC == "AV" | WaterSalinity_QC == "")
+
+bh_less <- bh %>% 
+  mutate(date = lubridate::mdy_hm(measurementTime)) %>% 
+  select(date, year, month, WaterSalinity_QC,
+           sal = WaterSalinity_Avg) %>% 
+  filter(WaterSalinity_QC == "AV" | WaterSalinity_QC == "")
 ```
 
 ```{r}
@@ -61,7 +74,8 @@ r_less <- r %>%
   mutate(date = lubridate::mdy(Date),
          year = lubridate::year(date)) %>% 
   filter(PARAM == 1) %>% 
-  filter(year > 2014)
+  filter(year > 2014) %>% 
+  select(date, year, q = Value)
 ```
 
 
@@ -93,30 +107,22 @@ formatter <- function(...){
 
 
 ```{r}
+#Plotting just median fluorescence - caution as trends look very notable, but there is a huge amount of variability at KC10
+
 ggplot() +
-  # geom_hline(yintercept = 1, linetype = "dotted") +
-  # geom_hline(yintercept = 5, linetype = "dotted") +
-  # geom_hline(yintercept = 10, linetype = "dotted") +
-  # geom_hline(yintercept = 20, linetype = "dotted") +
-  # geom_hline(yintercept = 30, linetype = "dotted") +
+
   geom_smooth(data = ctd_stat, aes(x = med_flu, y = pres, fill = station, color = station),
               orientation = "y", method = "loess", span = 0.2, se = F,
               alpha = 0.4, size = 2) +
   geom_point(data = ctd_stat, aes(x = med_flu, y = pres, color = station),
               alpha = 0.4, size = 3) +
-  # geom_errorbarh(data = ctd_stat, aes(x = med_flu,
-  #                                     xmin = med_flu - sd_flu,
-  #                                     xmax = med_flu - sd_flu, 
-  #                                     y = pres,
-  #                                     color = station),
-  #                position = position_dodge(0.3)) +
   ggsci::scale_color_aaas() +
   ggsci::scale_fill_aaas() +
   labs(x = "Fluorescence (ug/L)",
        y = "Depth (m)") +
   scale_y_reverse() +
   ylim(50, 1) +
-  scale_x_continuous(limits = c(0, NA), expand = c(0, 0), 
+  scale_x_continuous(limits = c(0, NA), expand = c(0, 0),
                      labels = formatter(nsmall = 1)) +
   facet_grid(.~season, scales = "free_x") +
   # ggtitle("Seasonal Profiles") +
@@ -131,6 +137,103 @@ ggplot() +
 ggsave(here("figures", "profile_season_leoss_both_median.png"),
        width = 20, height = 12, dpi = 300)
 ```
+
+#So, my previous plot was somewhat misleading. There is a huge amount of variability. This could be interesting temporally though. Plot integrated chlorophyll over the timeseries. Should calibrate sensors, but for now, first approximation. 
+
+I do think there is bad data included here though that needs to be removed - I think I did this though. Yes, 80217 removed. Other issues may remain.
+
+```{r}
+#calculating 50m integrated value for each station
+
+int_chl <- ctd %>% 
+  select(date, station, flu) %>% 
+  group_by(date, station) %>% 
+  summarise(int_50 = sum(flu, na.rm = T)) %>% 
+  ungroup()
+```
+
+```{r}
+#Plotting integrated chlorophyll time-series by station. Why are there so many data gaps? NA's in profile, likely at surface.
+
+int_chl %>% 
+  ggplot(aes(x = date, y = int_50, color = station)) +
+  geom_line(size = 1.5) +
+  geom_point(pch = 21, size = 2, fill = "white", stroke = 0.5) +
+  ggsci::scale_color_aaas() +
+  labs(y = "Int. Flu.") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "timeseries_flu_int_50.png"),
+       width = 16, height = 6, dpi = 300)
+```
+I like Colleen's idea of plotting data from the same week.
+```{r}
+#Could try to do this by calculating week of year for each station and joining by station:year:week
+
+week_qu39 <- int_chl %>% 
+  filter(station == "QU39") %>% 
+  group_by(date) %>% 
+  summarise(int_50 = mean(int_50)) %>% 
+  ungroup() %>% 
+  mutate(year = lubridate::year(date),
+         week = lubridate::week(date)) %>% 
+  select(year, week, int_qu39_50 = int_50)
+
+week_kc10 <- int_chl %>% 
+  filter(station == "KC10") %>% 
+  group_by(date) %>% 
+  summarise(int_50 = mean(int_50)) %>% 
+  ungroup() %>% 
+  mutate(year = lubridate::year(date),
+         week = lubridate::week(date)) %>% 
+  select(year, week, int_kc10_50 = int_50)
+
+int_week <- week_kc10 %>% 
+  left_join(week_qu39) %>% 
+  mutate(date = (lubridate::ymd( "2013-01-01") +
+                   lubridate::weeks(week - 1 ))) %>% 
+  pivot_longer(c(int_kc10_50, int_qu39_50), values_to = "int_50",
+               names_to = "station")
+```
+
+
+
+
+```{r}
+#To plot need to convert week back to date somehow
+
+
+int_week %>% 
+  ggplot(aes(x = date, y = int_50, color = station)) +
+  geom_line(size = 1.5) +
+  geom_point(pch = 21, size = 2, fill = "white", stroke = 0.5) +
+  ggsci::scale_color_aaas() +
+  labs(y = "Int. Flu.") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank(),
+        legend.title = element_blank(),
+        legend.position = c(0.85, 0.1),
+        panel.spacing = unit(3, "lines"))
+
+ggsave(here("figures", "timeseries_flu_int_50.png"),
+       width = 16, height = 6, dpi = 300)
+```
+
+
+
+
+
+
 
 
 
@@ -487,11 +590,23 @@ ctd_dm %>%
 
 #Including some bad data;
 #different depths;
-#joining based on daily average of the buy data and probably a lot of daily variability. Need to join by time. 
+#joining based on daily average of the buoy data and probably a lot of daily variability. Need to join by time. 
 ```
 
 ```{r}
 #How well does salinity align with river discharge over this period? Do my relationships hold?
+r_less <- r_less %>% 
+  mutate(q_b0 = zoo::rollmeanr(lag(q, 0), k = 10, fill = NA),
+         q_b1 = zoo::rollmeanr(lag(q, 1), k = 10, fill = NA)) 
+
+sal_riv <- ctd_dm %>% 
+  left_join(r_less)
+
+sal_riv %>% 
+  ggplot(aes(x = sal, y = q_b1)) +
+  geom_point()
+
+
 ```
 
 
